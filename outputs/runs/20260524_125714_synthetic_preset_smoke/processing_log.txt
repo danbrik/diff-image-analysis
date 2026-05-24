@@ -1,0 +1,15 @@
+run_start: 2026-05-24 12:57:14
+dataset: synthetic_test
+algorithm_preset: synthetic_quick_5x5
+roi_preset: synthetic_demo_roi
+range_start: None
+range_end: None
+insufficient_live_window: index=0
+insufficient_reference: index=1
+insufficient_reference: index=2
+insufficient_reference: index=3
+insufficient_reference: index=4
+insufficient_reference: index=5
+insufficient_reference: index=6
+run_end: 2026-05-24 12:57:18
+duration_seconds: 3.139

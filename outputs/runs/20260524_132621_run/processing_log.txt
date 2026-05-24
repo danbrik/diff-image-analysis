@@ -1,0 +1,18 @@
+run_start: 2026-05-24 13:26:21
+dataset: synthetic_test
+algorithm_preset: (unspecified)
+roi_preset: roi test
+range_start: None
+range_end: None
+insufficient_reference: index=0
+insufficient_reference: index=1
+insufficient_reference: index=2
+insufficient_reference: index=3
+insufficient_reference: index=4
+insufficient_reference: index=5
+insufficient_reference: index=6
+insufficient_reference: index=7
+insufficient_reference: index=8
+insufficient_reference: index=9
+run_end: 2026-05-24 13:26:23
+duration_seconds: 2.226

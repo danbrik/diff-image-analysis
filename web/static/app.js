@@ -1,0 +1,1433 @@
+const state = {
+  datasets: [],
+  selectedDataset: null,
+  rangeCount: 0,
+  roiPresets: [],
+  algorithmPresets: [],
+  algorithmDefaults: {},
+  preview: null,
+  previewImage: null,
+  roiCorners: null,
+  dragCorner: null,
+  currentRunId: null,
+  currentMetrics: [],
+  defaultMetrics: [],
+  availability: {
+    available_dates: [],
+    day_counts: {},
+    first_timestamp: null,
+    last_timestamp: null,
+  },
+  availableTimesByDate: {},
+  selectedMetrics: [],
+  resultRows: [],
+  plotZoom: null,
+  workflow: {
+    dataset: false,
+    roi: false,
+    algorithm: false,
+  },
+};
+
+const cornerOrder = ["top_left", "top_right", "bottom_right", "bottom_left"];
+const algorithmFields = [
+  ["reference_window_size_images", "number", "Reference window images", 1, 1],
+  ["reference_gap_images", "number", "Reference gap images", 0, 1],
+  ["live_average_size_images", "number", "Live average images", 1, 1],
+  ["processing_stride_images", "number", "Processing stride images", 1, 1],
+  ["difference_threshold_abs", "number", "Difference threshold abs", 0, 0.1],
+  ["smoothing_window_images", "number", "Smoothing window images", 1, 1],
+  ["image_downscale_factor", "number", "Image downscale factor", 0.001, 0.05],
+  ["use_median_reference", "checkbox", "Use median reference", null, null],
+  ["grid_size", "number", "Grid size", 1, 1],
+  ["output_directory", "text", "Output directory", null, null],
+  ["save_preview_images", "checkbox", "Save preview images", null, null],
+  ["preview_image_count", "number", "Preview image count", 0, 1],
+  ["run_name", "text", "Run name", null, null],
+];
+
+const algorithmHelp = {
+  reference_window_size_images:
+    "Number of previous images used to compute the reference image.",
+  reference_gap_images:
+    "Number of images between the current live image and the end of the reference window.",
+  live_average_size_images:
+    "Number of consecutive images averaged before processing the current live image. Use larger values to reduce noise and flicker.",
+  processing_stride_images:
+    "Process every nth image. A value of 1 processes every image; larger values reduce runtime and output density.",
+  difference_threshold_abs:
+    "Absolute difference threshold used for area-ratio metrics and affected-cell detection.",
+  smoothing_window_images:
+    "Rolling smoothing window applied to numeric output metrics. A value of 1 disables smoothing.",
+  image_downscale_factor:
+    "Scale factor applied while loading images. Use 1.0 for full resolution; values below 1.0 reduce memory and runtime.",
+  use_median_reference:
+    "Use a pixelwise median for the reference image instead of a mean. Median is more robust to short transient changes.",
+  grid_size:
+    "Splits the quadrilateral ROI into grid_size x grid_size cells that follow the ROI geometry.",
+  output_directory:
+    "Directory where timestamped run folders, CSV results, configs, logs, plots, and preview images are written.",
+  save_preview_images:
+    "Save example reference, live, diff, and ROI-grid overlay images into the run folder.",
+  preview_image_count:
+    "Number of processed examples for which preview images are saved. Use 0 to disable preview image output.",
+  run_name:
+    "Optional name appended to the timestamped output folder. Unsafe filename characters are replaced.",
+};
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
+function setStatus(id, message, kind = "") {
+  const el = $(id);
+  el.textContent = message || "";
+  el.classList.remove("warning", "error");
+  if (kind) el.classList.add(kind);
+}
+
+function renderDetails(id, pairs) {
+  const dl = $(id);
+  dl.replaceChildren();
+  for (const [label, value] of pairs) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (Array.isArray(value)) {
+      dd.textContent = value.join(", ");
+    } else {
+      dd.textContent = value ?? "";
+    }
+    dl.append(dt, dd);
+  }
+}
+
+function setWorkflowStatus(section, complete) {
+  state.workflow[section] = Boolean(complete);
+  updateWorkflowStatus();
+}
+
+function resetDownstreamStatus(fromSection) {
+  if (fromSection === "dataset") {
+    state.workflow.dataset = false;
+    state.workflow.roi = false;
+    state.workflow.algorithm = false;
+  } else if (fromSection === "roi") {
+    state.workflow.roi = false;
+    state.workflow.algorithm = false;
+  } else if (fromSection === "algorithm") {
+    state.workflow.algorithm = false;
+  }
+  updateWorkflowStatus();
+}
+
+function updateWorkflowStatus() {
+  const statusByStep = {
+    "dataset-step": state.workflow.dataset,
+    "roi-step": state.workflow.roi,
+    "algorithm-step": state.workflow.algorithm,
+    "execute-step": state.workflow.dataset && state.workflow.roi && state.workflow.algorithm,
+  };
+  for (const [stepId, complete] of Object.entries(statusByStep)) {
+    const button = document.querySelector(`.run-step-button[data-step="${stepId}"]`);
+    if (!button) continue;
+    button.classList.toggle("step-complete", complete);
+    button.setAttribute("aria-label", `${button.textContent.trim()} ${complete ? "complete" : "incomplete"}`);
+  }
+  $("load-preview").disabled = !state.workflow.dataset;
+  refreshRunButton();
+}
+
+function resetPreviewAndRoi() {
+  state.preview = null;
+  state.previewImage = null;
+  state.roiCorners = null;
+  state.dragCorner = null;
+  $("roi-preset-select").value = "";
+  $("roi-preset-name").value = "";
+  $("roi-comment").value = "";
+  setStatus("roi-status", "");
+  drawRoiCanvas();
+}
+
+function resetAlgorithmConfirmation() {
+  state.workflow.algorithm = false;
+  updateWorkflowStatus();
+}
+
+function markDatasetSelectionDirty() {
+  state.workflow.dataset = false;
+  state.workflow.roi = false;
+  state.workflow.algorithm = false;
+  resetPreviewAndRoi();
+  updateWorkflowStatus();
+}
+
+function markRoiDirty() {
+  state.workflow.roi = false;
+  state.workflow.algorithm = false;
+  updateWorkflowStatus();
+}
+
+function markAlgorithmDirty() {
+  state.workflow.algorithm = false;
+  updateWorkflowStatus();
+}
+
+function createInfoTip(text) {
+  const tip = document.createElement("span");
+  tip.className = "info-tip";
+  tip.tabIndex = 0;
+  tip.dataset.tooltip = text;
+  tip.title = text;
+  tip.textContent = "i";
+  return tip;
+}
+
+function createLabelHeading(text, helpText) {
+  const heading = document.createElement("span");
+  heading.className = "label-heading";
+  heading.append(document.createTextNode(text));
+  if (helpText) heading.append(createInfoTip(helpText));
+  return heading;
+}
+
+function toDatetimeLocalValue(value) {
+  if (!value) return "";
+  const match = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?/);
+  return match ? `${match[1]}T${match[2]}:${match[3] || "00"}` : "";
+}
+
+function setDefaultTimeRangeFromMetadata() {
+  if (!state.selectedDataset) return;
+  setRangeValue("start", toDatetimeLocalValue(state.selectedDataset.start_time));
+  setRangeValue("end", toDatetimeLocalValue(state.selectedDataset.end_time));
+  enforceRangeOrder();
+}
+
+function syncRangeVisibility() {
+  const mode = document.querySelector("input[name='time-mode']:checked")?.value || "complete";
+  const customFields = $("custom-range-fields");
+  const hidden = mode !== "custom";
+  customFields.hidden = hidden;
+  $("range-start-date").disabled = hidden;
+  $("range-end-date").disabled = hidden;
+  $("range-start-time").disabled = hidden;
+  $("range-end-time").disabled = hidden;
+  enforceRangeOrder();
+  void renderTimestampPicker();
+}
+
+function storeAvailability(availability, renderPicker = true) {
+  if (!availability) return;
+  state.availability = {
+    available_dates: availability.available_dates || [],
+    day_counts: availability.day_counts || {},
+    first_timestamp: availability.first_timestamp || null,
+    last_timestamp: availability.last_timestamp || null,
+  };
+  state.availableTimesByDate = {};
+  if (renderPicker) void renderTimestampPicker();
+}
+
+function enforceRangeOrder() {
+  const startInput = $("range-start");
+  const endInput = $("range-end");
+  if (startInput.value && endInput.value && endInput.value < startInput.value) {
+    setRangeValue("end", startInput.value);
+  }
+  syncRangeDisplay("start");
+  syncRangeDisplay("end");
+}
+
+function datePart(datetimeLocal) {
+  return datetimeLocal ? datetimeLocal.slice(0, 10) : "";
+}
+
+function setRangeValue(which, value) {
+  const hidden = which === "start" ? $("range-start") : $("range-end");
+  const display = which === "start" ? $("range-start-display") : $("range-end-display");
+  hidden.value = value || "";
+  if (display) display.value = value ? value.replace("T", " ") : "";
+}
+
+function syncRangeDisplay(which) {
+  const hidden = which === "start" ? $("range-start") : $("range-end");
+  const display = which === "start" ? $("range-start-display") : $("range-end-display");
+  if (display) display.value = hidden.value ? hidden.value.replace("T", " ") : "";
+}
+
+function resetAvailability() {
+  state.availability = { available_dates: [], day_counts: {}, first_timestamp: null, last_timestamp: null };
+  state.availableTimesByDate = {};
+}
+
+function setSelectPlaceholder(select, text) {
+  select.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = text;
+  select.append(option);
+  select.value = "";
+}
+
+function populateDateSelect(select, dates, selectedDate, isSelectable) {
+  select.replaceChildren();
+  for (const dateText of dates) {
+    const option = document.createElement("option");
+    option.value = dateText;
+    const count = state.availability.day_counts?.[dateText];
+    option.textContent = count ? `${dateText} (${count})` : dateText;
+    option.disabled = isSelectable ? !isSelectable(dateText) : false;
+    select.append(option);
+  }
+  select.value = selectedDate;
+}
+
+function populateTimeSelect(select, times, selectedTimestamp, isSelectable) {
+  select.replaceChildren();
+  for (const item of times) {
+    const option = document.createElement("option");
+    option.value = item.timestamp;
+    option.textContent = item.time;
+    option.disabled = isSelectable ? !isSelectable(item.timestamp) : false;
+    select.append(option);
+  }
+  select.value = selectedTimestamp;
+}
+
+function pickDate(dates, preferredDate, isSelectable, preferLast = false) {
+  const validDates = dates.filter((dateText) => (isSelectable ? isSelectable(dateText) : true));
+  if (!validDates.length) return "";
+  if (validDates.includes(preferredDate)) return preferredDate;
+  return validDates[preferLast ? validDates.length - 1 : 0];
+}
+
+function pickTimestamp(times, preferredTimestamp, isSelectable, preferLast = false) {
+  const validTimes = times.filter((item) => (isSelectable ? isSelectable(item.timestamp) : true));
+  if (!validTimes.length) return null;
+  const exact = validTimes.find((item) => item.timestamp === preferredTimestamp);
+  return exact || validTimes[preferLast ? validTimes.length - 1 : 0];
+}
+
+async function loadTimesForDate(dateText) {
+  if (!state.selectedDataset || !dateText) return [];
+  if (state.availableTimesByDate[dateText]) return state.availableTimesByDate[dateText];
+  const data = await fetchJson(
+    `/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/available-times?date=${encodeURIComponent(dateText)}`
+  );
+  state.availableTimesByDate[dateText] = data.times || [];
+  return state.availableTimesByDate[dateText];
+}
+
+let timestampPickerRenderId = 0;
+
+async function renderTimestampPicker() {
+  const renderId = ++timestampPickerRenderId;
+  const dates = state.availability.available_dates || [];
+  const dateSelects = [$("range-start-date"), $("range-end-date")];
+  const timeSelects = [$("range-start-time"), $("range-end-time")];
+  const mode = document.querySelector("input[name='time-mode']:checked")?.value || "complete";
+  const controlsHidden = mode !== "custom";
+  const help = $("timestamp-picker-help");
+
+  if (!dates.length) {
+    for (const select of dateSelects) setSelectPlaceholder(select, "No indexed dates");
+    for (const select of timeSelects) setSelectPlaceholder(select, "No indexed times");
+    for (const select of [...dateSelects, ...timeSelects]) select.disabled = true;
+    if (help) help.textContent = "Confirm the dataset first. Custom range choices are built from parsed image timestamps.";
+    return;
+  }
+
+  let startValue = $("range-start").value || toDatetimeLocalValue(state.availability.first_timestamp) || toDatetimeLocalValue(state.selectedDataset?.start_time);
+  let endValue = $("range-end").value || toDatetimeLocalValue(state.availability.last_timestamp) || toDatetimeLocalValue(state.selectedDataset?.end_time);
+  let startDate = pickDate(dates, datePart(startValue), null);
+  let endDate = pickDate(dates, datePart(endValue), (dateText) => !startDate || dateText >= startDate, true);
+  startDate = pickDate(dates, startDate, (dateText) => !endDate || dateText <= endDate);
+  if (!startDate || !endDate) return;
+
+  const [startTimes, endTimes] = await Promise.all([loadTimesForDate(startDate), loadTimesForDate(endDate)]);
+  if (renderId !== timestampPickerRenderId) return;
+
+  let startChoice = pickTimestamp(
+    startTimes,
+    startValue,
+    (timestamp) => startDate !== endDate || !endValue || timestamp <= endValue
+  );
+  if (!startChoice) startChoice = pickTimestamp(startTimes, startValue, null);
+  if (startChoice) {
+    startValue = startChoice.timestamp;
+    setRangeValue("start", startValue);
+  }
+
+  let endChoice = pickTimestamp(
+    endTimes,
+    endValue,
+    (timestamp) => endDate !== startDate || !startValue || timestamp >= startValue,
+    true
+  );
+  if (!endChoice) endChoice = pickTimestamp(endTimes, endValue, null, true);
+  if (endChoice) {
+    endValue = endChoice.timestamp;
+    setRangeValue("end", endValue);
+  }
+
+  enforceRangeOrder();
+  startDate = datePart($("range-start").value);
+  endDate = datePart($("range-end").value);
+  populateDateSelect($("range-start-date"), dates, startDate, (dateText) => !endDate || dateText <= endDate);
+  populateDateSelect($("range-end-date"), dates, endDate, (dateText) => !startDate || dateText >= startDate);
+  populateTimeSelect(
+    $("range-start-time"),
+    startTimes,
+    $("range-start").value,
+    (timestamp) => startDate !== endDate || timestamp <= $("range-end").value
+  );
+  populateTimeSelect(
+    $("range-end-time"),
+    endTimes,
+    $("range-end").value,
+    (timestamp) => startDate !== endDate || timestamp >= $("range-start").value
+  );
+  for (const select of [...dateSelects, ...timeSelects]) select.disabled = controlsHidden;
+  if (help) {
+    const first = state.availability.first_timestamp || "";
+    const last = state.availability.last_timestamp || "";
+    help.textContent = `Only dates and times with parsed images are selectable. Indexed timestamp range: ${first} to ${last}.`;
+  }
+}
+
+async function onTimestampDateChange(which) {
+  const startDateSelect = $("range-start-date");
+  const endDateSelect = $("range-end-date");
+  const dateText = which === "start" ? startDateSelect.value : endDateSelect.value;
+  const times = await loadTimesForDate(dateText);
+  const preferred = which === "start" ? $("range-start").value : $("range-end").value;
+  const other = which === "start" ? $("range-end").value : $("range-start").value;
+  const choice = pickTimestamp(
+    times,
+    preferred,
+    (timestamp) => {
+      if (!other || datePart(other) !== dateText) return true;
+      return which === "start" ? timestamp <= other : timestamp >= other;
+    },
+    which === "end"
+  );
+  if (choice) setRangeValue(which, choice.timestamp);
+  enforceRangeOrder();
+  await renderTimestampPicker();
+  markDatasetSelectionDirty();
+  updateRangeCount();
+}
+
+async function onTimestampTimeChange(which) {
+  const select = which === "start" ? $("range-start-time") : $("range-end-time");
+  if (select.value) setRangeValue(which, select.value);
+  enforceRangeOrder();
+  await renderTimestampPicker();
+  markDatasetSelectionDirty();
+  updateRangeCount();
+}
+
+function resetWorkflow() {
+  state.workflow.dataset = false;
+  state.workflow.roi = false;
+  state.workflow.algorithm = false;
+  state.rangeCount = 0;
+
+  const completeRadio = document.querySelector("input[name='time-mode'][value='complete']");
+  if (completeRadio) completeRadio.checked = true;
+  syncRangeVisibility();
+
+  if (state.datasets.length) {
+    const firstDataset = state.datasets[0];
+    $("dataset-select").value = firstDataset.name;
+    setSelectedDataset(firstDataset.name, { resetDependent: true });
+  }
+
+  if (state.algorithmDefaults && Object.keys(state.algorithmDefaults).length) {
+    renderAlgorithmForm(state.algorithmDefaults);
+  }
+  $("algorithm-preset-select").value = "";
+  $("algorithm-preset-name").value = "";
+  $("algorithm-comment").value = "";
+  $("roi-scope").value = "dataset";
+  setStatus("plot-status", "");
+  $("progress-fill").style.width = "0%";
+  renderDetails("progress-details", []);
+
+  switchTab("run-tab");
+  switchRunStep("dataset-step");
+  resetPreviewAndRoi();
+  updateWorkflowStatus();
+  drawRoiCanvas();
+  refreshRunButton();
+}
+
+function switchTab(tabId) {
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === tabId);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === tabId);
+  });
+  if (tabId === "run-tab") drawRoiCanvas();
+}
+
+function switchRunStep(stepId) {
+  document.querySelectorAll(".run-step-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.step === stepId);
+  });
+  document.querySelectorAll(".run-step-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === stepId);
+  });
+  if (stepId === "roi-step") drawRoiCanvas();
+}
+
+async function loadDatasets() {
+  const data = await fetchJson("/api/datasets");
+  state.datasets = data.datasets;
+  const select = $("dataset-select");
+  select.replaceChildren();
+  for (const dataset of state.datasets) {
+    const option = document.createElement("option");
+    option.value = dataset.name;
+    option.textContent = dataset.name;
+    select.append(option);
+  }
+  if (state.datasets.length) {
+    select.value = state.selectedDataset?.name || state.datasets[0].name;
+    setSelectedDataset(select.value);
+  } else {
+    renderDetails("dataset-details", [["Status", "No datasets found in configs/datasets.yaml"]]);
+  }
+}
+
+function setSelectedDataset(name, options = {}) {
+  const previousDatasetName = state.selectedDataset?.name || "";
+  state.selectedDataset = state.datasets.find((dataset) => dataset.name === name) || null;
+  if (!state.selectedDataset) return;
+  if (options.resetDependent || (previousDatasetName && previousDatasetName !== state.selectedDataset.name)) {
+    state.rangeCount = 0;
+    resetAvailability();
+    state.workflow.dataset = false;
+    state.workflow.roi = false;
+    state.workflow.algorithm = false;
+    resetPreviewAndRoi();
+  }
+  setDefaultTimeRangeFromMetadata();
+  syncRangeVisibility();
+  renderDatasetDetails();
+  loadRoiPresets();
+  updateRangeCount();
+  updateWorkflowStatus();
+}
+
+function renderDatasetDetails() {
+  const dataset = state.selectedDataset;
+  if (!dataset) return;
+  renderDetails("dataset-details", [
+    ["Name", dataset.name],
+    ["Folders", dataset.folders || []],
+    ["Metadata start", dataset.start_time],
+    ["Metadata end", dataset.end_time],
+    ["Description", dataset.description],
+    ["Indexed files", dataset.file_count ?? "not indexed"],
+    ["Missing timestamps", dataset.missing_timestamp_count ?? ""],
+    ["First parsed timestamp", dataset.first_timestamp ?? ""],
+    ["Last parsed timestamp", dataset.last_timestamp ?? ""],
+  ]);
+}
+
+async function indexSelectedDataset() {
+  if (!state.selectedDataset) return;
+  setStatus("range-summary", "Confirming dataset and indexing images...");
+  const data = await fetchJson(`/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/index`, {
+    method: "POST",
+  });
+  storeAvailability(data.availability, false);
+  await renderTimestampPicker();
+  Object.assign(state.selectedDataset, data.summary, { indexed: true });
+  renderDatasetDetails();
+  await updateRangeCount();
+  state.workflow.dataset = state.rangeCount > 0;
+  state.workflow.roi = false;
+  state.workflow.algorithm = false;
+  resetPreviewAndRoi();
+  updateWorkflowStatus();
+  if (state.rangeCount > 0) {
+    switchRunStep("roi-step");
+    await loadPreview();
+  }
+}
+
+function rangeParams() {
+  const params = new URLSearchParams();
+  const mode = document.querySelector("input[name='time-mode']:checked").value;
+  params.set("mode", mode);
+  if (mode === "custom") {
+    params.set("start", $("range-start").value);
+    params.set("end", $("range-end").value);
+  }
+  return params;
+}
+
+async function updateRangeCount() {
+  if (!state.selectedDataset) return;
+  enforceRangeOrder();
+  if (!state.selectedDataset.indexed) {
+    state.rangeCount = 0;
+    resetAvailability();
+    void renderTimestampPicker();
+    setStatus("range-summary", "Confirm the selected dataset to count images in the processing range.");
+    refreshRunButton();
+    return;
+  }
+  try {
+    const data = await fetchJson(
+      `/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/range-count?${rangeParams()}`
+    );
+    storeAvailability(data.availability);
+    state.rangeCount = data.count;
+    const message = data.warning
+      ? `${data.warning} Indexed files: ${data.file_count}.`
+      : `Images in selected range: ${data.count}. Actual parsed range: ${data.first_timestamp || ""} to ${data.last_timestamp || ""}.`;
+    setStatus("range-summary", message, data.warning ? "warning" : "");
+  } catch (error) {
+    state.rangeCount = 0;
+    setStatus("range-summary", error.message, "error");
+  }
+  refreshRunButton();
+}
+
+async function loadPreview() {
+  if (!state.selectedDataset) return;
+  if (!state.selectedDataset.indexed) {
+    setStatus("roi-status", "Confirm the selected dataset before loading the first image preview.", "warning");
+    return;
+  }
+  const datasetName = state.selectedDataset.name;
+  setStatus("roi-status", "Loading preview image...");
+  const data = await fetchJson(
+    `/api/datasets/${encodeURIComponent(datasetName)}/preview-info?${rangeParams()}`
+  );
+  if (!state.selectedDataset || state.selectedDataset.name !== datasetName) return;
+  state.preview = data;
+  state.previewImage = new Image();
+  state.previewImage.onload = () => {
+    if (!state.selectedDataset || state.selectedDataset.name !== datasetName) return;
+    if (!state.roiCorners) {
+      state.roiCorners = defaultCorners(data.original_shape);
+    }
+    markRoiDirty();
+    drawRoiCanvas();
+    setStatus(
+      "roi-status",
+      `Preview loaded: ${data.image_path}. Original shape: ${data.original_shape[0]} x ${data.original_shape[1]}.`
+    );
+    refreshRunButton();
+  };
+  state.previewImage.src = data.image_url;
+}
+
+function defaultCorners(shape) {
+  const height = shape[0];
+  const width = shape[1];
+  const marginX = width * 0.15;
+  const marginY = height * 0.15;
+  return {
+    top_left: [marginX, marginY],
+    top_right: [width - marginX, marginY],
+    bottom_right: [width - marginX, height - marginY],
+    bottom_left: [marginX, height - marginY],
+  };
+}
+
+function previewScale() {
+  if (!state.preview) return 1;
+  return state.preview.scale || state.preview.preview_shape[1] / state.preview.original_shape[1];
+}
+
+function toPreviewPoint(point) {
+  const scale = previewScale();
+  return [point[0] * scale, point[1] * scale];
+}
+
+function bilinear(corners, u, v) {
+  const tl = corners.top_left;
+  const tr = corners.top_right;
+  const br = corners.bottom_right;
+  const bl = corners.bottom_left;
+  return [
+    (1 - u) * (1 - v) * tl[0] + u * (1 - v) * tr[0] + u * v * br[0] + (1 - u) * v * bl[0],
+    (1 - u) * (1 - v) * tl[1] + u * (1 - v) * tr[1] + u * v * br[1] + (1 - u) * v * bl[1],
+  ];
+}
+
+function drawRoiCanvas() {
+  const canvas = $("roi-canvas");
+  const ctx = canvas.getContext("2d");
+  if (!state.preview || !state.previewImage) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillText("Load a dataset preview to define an ROI.", 20, 30);
+    return;
+  }
+  const [previewHeight, previewWidth] = state.preview.preview_shape;
+  canvas.width = previewWidth;
+  canvas.height = previewHeight;
+  ctx.drawImage(state.previewImage, 0, 0, previewWidth, previewHeight);
+  if (!state.roiCorners) return;
+
+  const points = cornerOrder.map((name) => toPreviewPoint(state.roiCorners[name]));
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255, 0, 0, 0.22)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 50, 50, 0.95)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  const gridSize = getGridSize();
+  ctx.strokeStyle = "rgba(255, 220, 80, 0.9)";
+  ctx.lineWidth = gridSize > 7 ? 1 : 1.5;
+  for (let i = 0; i <= gridSize; i += 1) {
+    const t = i / gridSize;
+    drawLine(ctx, toPreviewPoint(bilinear(state.roiCorners, t, 0)), toPreviewPoint(bilinear(state.roiCorners, t, 1)));
+    drawLine(ctx, toPreviewPoint(bilinear(state.roiCorners, 0, t)), toPreviewPoint(bilinear(state.roiCorners, 1, t)));
+  }
+
+  for (const [index, name] of cornerOrder.entries()) {
+    const [x, y] = points[index];
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.strokeStyle = "#dc2626";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#111827";
+    ctx.font = "12px system-ui";
+    ctx.fillText(String(index + 1), x + 9, y - 9);
+  }
+}
+
+function drawLine(ctx, start, end) {
+  ctx.beginPath();
+  ctx.moveTo(start[0], start[1]);
+  ctx.lineTo(end[0], end[1]);
+  ctx.stroke();
+}
+
+function getGridSize() {
+  const value = Math.max(1, parseInt($("grid-size").value || "3", 10));
+  $("grid-size").value = value;
+  const field = document.querySelector("[data-algorithm-field='grid_size']");
+  if (field && field.value !== String(value)) field.value = String(value);
+  return value;
+}
+
+function canvasPointFromEvent(event) {
+  const canvas = $("roi-canvas");
+  const rect = canvas.getBoundingClientRect();
+  return [
+    ((event.clientX - rect.left) * canvas.width) / rect.width,
+    ((event.clientY - rect.top) * canvas.height) / rect.height,
+  ];
+}
+
+function nearestCorner(canvasPoint) {
+  if (!state.roiCorners) return null;
+  let bestName = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const name of cornerOrder) {
+    const point = toPreviewPoint(state.roiCorners[name]);
+    const distance = Math.hypot(point[0] - canvasPoint[0], point[1] - canvasPoint[1]);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestName = name;
+    }
+  }
+  return bestDistance <= 18 ? bestName : null;
+}
+
+function handleCanvasDown(event) {
+  const corner = nearestCorner(canvasPointFromEvent(event));
+  if (corner) {
+    state.dragCorner = corner;
+    event.preventDefault();
+  }
+}
+
+function handleCanvasMove(event) {
+  if (!state.dragCorner || !state.preview) return;
+  const [x, y] = canvasPointFromEvent(event);
+  const scale = previewScale();
+  const width = state.preview.original_shape[1];
+  const height = state.preview.original_shape[0];
+  state.roiCorners[state.dragCorner] = [
+    Math.max(0, Math.min(width - 1, x / scale)),
+    Math.max(0, Math.min(height - 1, y / scale)),
+  ];
+  markRoiDirty();
+  drawRoiCanvas();
+}
+
+function handleCanvasUp() {
+  state.dragCorner = null;
+}
+
+async function loadRoiPresets() {
+  if (!state.selectedDataset) return;
+  const data = await fetchJson(`/api/roi-presets?dataset=${encodeURIComponent(state.selectedDataset.name)}`);
+  state.roiPresets = data.presets;
+  const select = $("roi-preset-select");
+  select.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "Create new ROI";
+  select.append(empty);
+  for (const preset of state.roiPresets) {
+    const option = document.createElement("option");
+    option.value = preset.preset_name;
+    option.textContent = `${preset.preset_name} (${preset.dataset_name})`;
+    select.append(option);
+  }
+}
+
+function selectedRoiPreset() {
+  const name = $("roi-preset-select").value;
+  return state.roiPresets.find((preset) => preset.preset_name === name) || null;
+}
+
+function applyRoiPreset() {
+  const preset = selectedRoiPreset();
+  if (!preset) return;
+  state.roiCorners = JSON.parse(JSON.stringify(preset.corners));
+  $("roi-preset-name").value = preset.preset_name;
+  $("roi-comment").value = preset.comment || "";
+  markRoiDirty();
+  drawRoiCanvas();
+  setStatus("roi-status", `Applied ROI preset ${preset.preset_name}.`);
+  refreshRunButton();
+}
+
+async function saveRoiPreset(overwrite) {
+  if (!state.preview || !state.roiCorners || !state.selectedDataset) {
+    setStatus("roi-status", "Load a preview image and define an ROI first.", "warning");
+    return;
+  }
+  const name = $("roi-preset-name").value.trim();
+  if (!name) {
+    setStatus("roi-status", "Enter an ROI preset name.", "warning");
+    return;
+  }
+  const datasetName = $("roi-scope").value === "global" ? "global" : state.selectedDataset.name;
+  const payload = {
+    preset_name: name,
+    dataset_name: datasetName,
+    image_shape: state.preview.original_shape,
+    corners: state.roiCorners,
+    comment: $("roi-comment").value,
+    overwrite,
+  };
+  try {
+    await fetchJson("/api/roi-presets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadRoiPresets();
+    $("roi-preset-select").value = name;
+    setStatus("roi-status", `Saved ROI preset ${name}.`);
+  } catch (error) {
+    setStatus("roi-status", error.message, "error");
+  }
+}
+
+function confirmRoi() {
+  if (!state.workflow.dataset) {
+    setStatus("roi-status", "Confirm the dataset and time range first.", "warning");
+    switchRunStep("dataset-step");
+    return;
+  }
+  if (!state.preview || !state.roiCorners) {
+    setStatus("roi-status", "Load the first image and define an ROI before confirming.", "warning");
+    return;
+  }
+  setWorkflowStatus("roi", true);
+  setStatus("roi-status", "ROI confirmed for this run.");
+  switchRunStep("algorithm-step");
+}
+
+async function loadAlgorithmPresets() {
+  const data = await fetchJson("/api/algorithm-presets");
+  state.algorithmPresets = data.presets;
+  state.algorithmDefaults = data.defaults;
+  renderAlgorithmForm(state.algorithmDefaults);
+  const select = $("algorithm-preset-select");
+  select.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "Use current values";
+  select.append(empty);
+  for (const preset of state.algorithmPresets) {
+    const option = document.createElement("option");
+    option.value = preset.preset_name;
+    option.textContent = preset.preset_name;
+    select.append(option);
+  }
+}
+
+function renderAlgorithmForm(values) {
+  const form = $("algorithm-form");
+  form.replaceChildren();
+  for (const [name, type, labelText, min, step] of algorithmFields) {
+    if (type === "checkbox") {
+      const label = document.createElement("label");
+      label.className = "checkbox-label";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.algorithmField = name;
+      input.checked = Boolean(values[name]);
+      input.addEventListener("change", markAlgorithmDirty);
+      label.append(input, createLabelHeading(labelText, algorithmHelp[name]));
+      form.append(label);
+    } else {
+      const label = document.createElement("label");
+      label.append(createLabelHeading(labelText, algorithmHelp[name]));
+      const input = document.createElement("input");
+      input.type = type;
+      input.dataset.algorithmField = name;
+      input.value = values[name] ?? "";
+      if (min !== null) input.min = min;
+      if (step !== null) input.step = step;
+      if (name === "grid_size") {
+        input.addEventListener("change", () => {
+          $("grid-size").value = input.value;
+          markRoiDirty();
+          markAlgorithmDirty();
+          drawRoiCanvas();
+        });
+      } else {
+        input.addEventListener("change", markAlgorithmDirty);
+      }
+      label.append(input);
+      form.append(label);
+    }
+  }
+  $("grid-size").value = values.grid_size ?? 3;
+  drawRoiCanvas();
+}
+
+function selectedAlgorithmPreset() {
+  const name = $("algorithm-preset-select").value;
+  return state.algorithmPresets.find((preset) => preset.preset_name === name) || null;
+}
+
+function applyAlgorithmPreset() {
+  const preset = selectedAlgorithmPreset();
+  if (!preset) return;
+  renderAlgorithmForm({ ...state.algorithmDefaults, ...preset });
+  $("algorithm-preset-name").value = preset.preset_name;
+  $("algorithm-comment").value = preset.comment || "";
+  markAlgorithmDirty();
+}
+
+function getAlgorithmConfig() {
+  const config = {};
+  for (const input of document.querySelectorAll("[data-algorithm-field]")) {
+    const name = input.dataset.algorithmField;
+    if (input.type === "checkbox") {
+      config[name] = input.checked;
+    } else if (input.type === "number") {
+      config[name] = Number(input.value);
+    } else {
+      config[name] = input.value;
+    }
+  }
+  config.grid_size = getGridSize();
+  return config;
+}
+
+async function saveAlgorithmPreset(overwrite) {
+  const name = $("algorithm-preset-name").value.trim();
+  if (!name) {
+    alert("Enter an algorithm preset name.");
+    return;
+  }
+  try {
+    await fetchJson("/api/algorithm-presets", {
+      method: "POST",
+      body: JSON.stringify({
+        preset_name: name,
+        config: getAlgorithmConfig(),
+        comment: $("algorithm-comment").value,
+        overwrite,
+      }),
+    });
+    await loadAlgorithmPresets();
+    $("algorithm-preset-select").value = name;
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function confirmAlgorithm() {
+  if (!state.workflow.dataset) {
+    switchRunStep("dataset-step");
+    setStatus("range-summary", "Confirm the dataset and time range before confirming the algorithm.", "warning");
+    return;
+  }
+  if (!state.workflow.roi) {
+    switchRunStep("roi-step");
+    setStatus("roi-status", "Confirm the ROI before confirming the algorithm.", "warning");
+    return;
+  }
+  try {
+    getAlgorithmConfig();
+    setWorkflowStatus("algorithm", true);
+    switchRunStep("execute-step");
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function refreshRunButton() {
+  $("start-run").disabled = !(
+    state.workflow.dataset
+    && state.workflow.roi
+    && state.workflow.algorithm
+    && state.selectedDataset
+    && state.rangeCount > 0
+    && state.roiCorners
+    && state.preview
+  );
+}
+
+async function startRun() {
+  if ($("start-run").disabled || !state.selectedDataset || !state.preview || !state.roiCorners) return;
+  switchRunStep("execute-step");
+  const mode = document.querySelector("input[name='time-mode']:checked").value;
+  const algorithmConfig = getAlgorithmConfig();
+  const roiPreset = selectedRoiPreset();
+  const payload = {
+    dataset_name: state.selectedDataset.name,
+    time_mode: mode,
+    range_start: $("range-start").value,
+    range_end: $("range-end").value,
+    algorithm_config: algorithmConfig,
+    algorithm_preset_name: $("algorithm-preset-select").value,
+    roi_preset_name: roiPreset ? roiPreset.preset_name : "",
+    roi_config: {
+      preset_name: roiPreset ? roiPreset.preset_name : "current_ui_roi",
+      dataset_name: roiPreset ? roiPreset.dataset_name : state.selectedDataset.name,
+      image_shape: state.preview.original_shape,
+      corners: state.roiCorners,
+      created_at: new Date().toISOString(),
+      comment: $("roi-comment").value,
+    },
+  };
+  $("start-run").disabled = true;
+  const data = await fetchJson("/api/runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  pollRun(data.job_id);
+}
+
+async function pollRun(jobId) {
+  const data = await fetchJson(`/api/runs/${jobId}/status`);
+  renderProgress(data);
+  if (data.state === "running") {
+    setTimeout(() => pollRun(jobId), 1000);
+  } else {
+    refreshRunButton();
+    if (data.state === "finished" && data.result?.run_id) {
+      await loadRuns();
+      switchTab("results-tab");
+      $("run-select").value = data.result.run_id;
+      await loadRunDetails();
+    }
+  }
+}
+
+function renderProgress(job) {
+  const progress = job.progress || {};
+  const pct = Math.max(0, Math.min(100, Number(progress.percentage || 0)));
+  $("progress-fill").style.width = `${pct}%`;
+  renderDetails("progress-details", [
+    ["State", job.state],
+    ["Dataset", progress.dataset_name || ""],
+    ["Total images", progress.total_images ?? ""],
+    ["Processed images", progress.processed_images ?? ""],
+    ["Current image index", progress.current_image_index ?? ""],
+    ["Current timestamp", progress.current_timestamp ?? ""],
+    ["Progress", `${pct.toFixed(1)}%`],
+    ["Status", job.error || progress.status_message || ""],
+    ["Run folder", job.result?.run_folder || ""],
+  ]);
+}
+
+async function loadRuns() {
+  const data = await fetchJson("/api/results/runs");
+  const select = $("run-select");
+  const current = select.value;
+  select.replaceChildren();
+  for (const run of data.runs) {
+    const option = document.createElement("option");
+    option.value = run.run_id;
+    option.textContent = run.run_id;
+    select.append(option);
+  }
+  if (current) select.value = current;
+}
+
+async function loadRunDetails() {
+  const runId = $("run-select").value;
+  if (!runId) return;
+  const data = await fetchJson(`/api/results/runs/${encodeURIComponent(runId)}`);
+  state.currentRunId = runId;
+  state.currentMetrics = data.metric_columns;
+  state.defaultMetrics = data.default_metrics;
+  state.selectedMetrics = [...data.default_metrics];
+  state.plotZoom = null;
+  state.resultRows = [];
+  $("run-config-view").textContent = JSON.stringify(data.run_config, null, 2);
+  $("dataset-config-view").textContent = JSON.stringify(data.dataset_config_used, null, 2);
+  $("roi-config-view").textContent = JSON.stringify(data.roi_config, null, 2);
+  renderMetricList();
+  await loadInteractiveResultData();
+  if (data.summary_plot_url) {
+    $("result-plot").src = `${data.summary_plot_url}?t=${Date.now()}`;
+    $("result-plot").style.display = "block";
+  }
+}
+
+function renderMetricList() {
+  const list = $("metric-list");
+  const query = $("metric-search").value.toLowerCase();
+  list.replaceChildren();
+  for (const metric of state.currentMetrics) {
+    if (query && !metric.toLowerCase().includes(query)) continue;
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = metric;
+    input.checked = state.selectedMetrics.includes(metric);
+    input.addEventListener("change", () => updateMetricSelection(metric, input.checked));
+    label.append(input, document.createTextNode(metric));
+    list.append(label);
+  }
+}
+
+async function updateMetricSelection(metric, selected) {
+  const existing = new Set(state.selectedMetrics);
+  if (selected) {
+    existing.add(metric);
+  } else {
+    existing.delete(metric);
+  }
+  state.selectedMetrics = Array.from(existing).filter((name) => state.currentMetrics.includes(name));
+  renderMetricList();
+  await loadInteractiveResultData();
+}
+
+async function loadInteractiveResultData() {
+  const container = $("interactive-plots");
+  if (!state.currentRunId || !state.selectedMetrics.length) {
+    state.resultRows = [];
+    renderInteractivePlots();
+    return;
+  }
+  const params = new URLSearchParams();
+  for (const metric of state.selectedMetrics) params.append("metric", metric);
+  const data = await fetchJson(`/api/results/runs/${encodeURIComponent(state.currentRunId)}/data?${params}`);
+  state.resultRows = data.rows.map((row) => ({
+    ...row,
+    timestampMs: row.timestamp ? new Date(row.timestamp).getTime() : NaN,
+  }));
+  container.dataset.loaded = "true";
+  renderInteractivePlots();
+}
+
+function renderInteractivePlots() {
+  const container = $("interactive-plots");
+  container.replaceChildren();
+  if (!state.selectedMetrics.length) {
+    const empty = document.createElement("div");
+    empty.className = "plot-empty";
+    empty.textContent = "Select one or more metrics to show interactive plots.";
+    container.append(empty);
+    return;
+  }
+  if (!state.resultRows.length) {
+    const empty = document.createElement("div");
+    empty.className = "plot-empty";
+    empty.textContent = "No result rows loaded for the selected metrics.";
+    container.append(empty);
+    return;
+  }
+  for (const metric of state.selectedMetrics) {
+    container.append(createPlotCard(metric));
+  }
+}
+
+function createPlotCard(metric) {
+  const card = document.createElement("div");
+  card.className = "plot-card";
+  const header = document.createElement("div");
+  header.className = "plot-card-header";
+  const title = document.createElement("div");
+  title.className = "plot-card-title";
+  title.textContent = metric;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "plot-remove";
+  remove.title = `Remove ${metric}`;
+  remove.textContent = "×";
+  remove.addEventListener("click", () => updateMetricSelection(metric, false));
+  header.append(title, remove);
+  const svg = renderSvgPlot(metric);
+  card.append(header, svg);
+  return card;
+}
+
+function renderSvgPlot(metric) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "plot-svg");
+  svg.setAttribute("viewBox", "0 0 900 240");
+  const width = 900;
+  const height = 240;
+  const margin = { top: 18, right: 24, bottom: 42, left: 64 };
+  const points = state.resultRows
+    .map((row) => ({ x: row.timestampMs, y: Number(row[metric]) }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!points.length) {
+    const text = svgText(450, 120, "No numeric values for this metric", "middle");
+    svg.append(text);
+    return svg;
+  }
+  let xMin = Math.min(...points.map((point) => point.x));
+  let xMax = Math.max(...points.map((point) => point.x));
+  if (state.plotZoom) {
+    xMin = state.plotZoom[0];
+    xMax = state.plotZoom[1];
+  }
+  const visible = points.filter((point) => point.x >= xMin && point.x <= xMax);
+  const yValues = visible.length ? visible.map((point) => point.y) : points.map((point) => point.y);
+  let yMin = Math.min(...yValues);
+  let yMax = Math.max(...yValues);
+  if (yMin === yMax) {
+    yMin -= 1;
+    yMax += 1;
+  }
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const xScale = (x) => margin.left + ((x - xMin) / Math.max(1, xMax - xMin)) * plotWidth;
+  const yScale = (y) => margin.top + (1 - (y - yMin) / Math.max(1e-9, yMax - yMin)) * plotHeight;
+
+  for (let i = 0; i <= 4; i += 1) {
+    const y = margin.top + (plotHeight * i) / 4;
+    svg.append(svgLine(margin.left, y, width - margin.right, y, "plot-gridline"));
+    const value = yMax - ((yMax - yMin) * i) / 4;
+    svg.append(svgText(margin.left - 8, y + 4, formatMetricTick(value), "end"));
+  }
+  svg.append(svgLine(margin.left, height - margin.bottom, width - margin.right, height - margin.bottom, "plot-axis"));
+  svg.append(svgLine(margin.left, margin.top, margin.left, height - margin.bottom, "plot-axis"));
+
+  const pathPoints = visible.length ? visible : points;
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute(
+    "d",
+    pathPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.x).toFixed(2)} ${yScale(point.y).toFixed(2)}`).join(" ")
+  );
+  path.setAttribute("class", "plot-line");
+  svg.append(path);
+
+  const tickCount = 4;
+  for (let i = 0; i <= tickCount; i += 1) {
+    const x = margin.left + (plotWidth * i) / tickCount;
+    const time = xMin + ((xMax - xMin) * i) / tickCount;
+    svg.append(svgText(x, height - 16, formatTimeTick(time), "middle"));
+  }
+
+  let dragStart = null;
+  let brush = null;
+  svg.addEventListener("pointerdown", (event) => {
+    const x = svgPointerX(svg, event);
+    if (x < margin.left || x > width - margin.right) return;
+    dragStart = x;
+    brush = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    brush.setAttribute("class", "plot-brush");
+    brush.setAttribute("y", String(margin.top));
+    brush.setAttribute("height", String(plotHeight));
+    brush.setAttribute("x", String(x));
+    brush.setAttribute("width", "0");
+    svg.append(brush);
+    svg.setPointerCapture(event.pointerId);
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (dragStart === null || !brush) return;
+    const x = Math.max(margin.left, Math.min(width - margin.right, svgPointerX(svg, event)));
+    brush.setAttribute("x", String(Math.min(dragStart, x)));
+    brush.setAttribute("width", String(Math.abs(x - dragStart)));
+  });
+  svg.addEventListener("pointerup", (event) => {
+    if (dragStart === null || !brush) return;
+    const endX = Math.max(margin.left, Math.min(width - margin.right, svgPointerX(svg, event)));
+    const startX = dragStart;
+    brush.remove();
+    brush = null;
+    dragStart = null;
+    if (Math.abs(endX - startX) > 10) {
+      const left = Math.min(startX, endX);
+      const right = Math.max(startX, endX);
+      const toTime = (x) => xMin + ((x - margin.left) / plotWidth) * (xMax - xMin);
+      state.plotZoom = [toTime(left), toTime(right)];
+      renderInteractivePlots();
+    }
+  });
+  return svg;
+}
+
+function svgPointerX(svg, event) {
+  const rect = svg.getBoundingClientRect();
+  return ((event.clientX - rect.left) / rect.width) * 900;
+}
+
+function svgLine(x1, y1, x2, y2, className) {
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", className);
+  return line;
+}
+
+function svgText(x, y, text, anchor) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  el.setAttribute("x", String(x));
+  el.setAttribute("y", String(y));
+  el.setAttribute("text-anchor", anchor);
+  el.setAttribute("font-size", "11");
+  el.setAttribute("fill", "#667085");
+  el.textContent = text;
+  return el;
+}
+
+function formatMetricTick(value) {
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatTimeTick(ms) {
+  return new Date(ms).toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function plotSelectedMetrics() {
+  if (!state.currentRunId) return;
+  const metrics = state.selectedMetrics;
+  if (!metrics.length) {
+    setStatus("plot-status", "Select at least one metric.", "warning");
+    return;
+  }
+  const data = await fetchJson(`/api/results/runs/${encodeURIComponent(state.currentRunId)}/plot`, {
+    method: "POST",
+    body: JSON.stringify({ metrics }),
+  });
+  $("result-plot").src = `${data.plot_url}?t=${Date.now()}`;
+  $("result-plot").style.display = "block";
+  setStatus("plot-status", `Saved plot with ${data.plotted_metrics.length} metric(s).`);
+}
+
+function bindEvents() {
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.addEventListener("click", () => switchTab(button.dataset.tab));
+  });
+  $("reset-workflow").addEventListener("click", resetWorkflow);
+  document.querySelectorAll(".run-step-button").forEach((button) => {
+    button.addEventListener("click", () => switchRunStep(button.dataset.step));
+  });
+  $("refresh-datasets").addEventListener("click", loadDatasets);
+  $("dataset-select").addEventListener("change", (event) => {
+    setSelectedDataset(event.target.value, { resetDependent: true });
+    switchRunStep("dataset-step");
+  });
+  $("index-dataset").addEventListener("click", indexSelectedDataset);
+  document.querySelectorAll("input[name='time-mode']").forEach((input) => {
+    input.addEventListener("change", () => {
+      markDatasetSelectionDirty();
+      syncRangeVisibility();
+      updateRangeCount();
+    });
+  });
+  $("range-start-date").addEventListener("change", () => void onTimestampDateChange("start"));
+  $("range-end-date").addEventListener("change", () => void onTimestampDateChange("end"));
+  $("range-start-time").addEventListener("change", () => void onTimestampTimeChange("start"));
+  $("range-end-time").addEventListener("change", () => void onTimestampTimeChange("end"));
+  $("load-preview").addEventListener("click", loadPreview);
+  $("grid-size").addEventListener("change", () => {
+    getGridSize();
+    markRoiDirty();
+    markAlgorithmDirty();
+    drawRoiCanvas();
+  });
+  $("apply-roi-preset").addEventListener("click", applyRoiPreset);
+  $("confirm-roi").addEventListener("click", confirmRoi);
+  $("save-roi-new").addEventListener("click", () => saveRoiPreset(false));
+  $("save-roi-overwrite").addEventListener("click", () => saveRoiPreset(true));
+  $("reload-algorithm-presets").addEventListener("click", loadAlgorithmPresets);
+  $("apply-algorithm-preset").addEventListener("click", applyAlgorithmPreset);
+  $("confirm-algorithm").addEventListener("click", confirmAlgorithm);
+  $("save-algorithm-new").addEventListener("click", () => saveAlgorithmPreset(false));
+  $("save-algorithm-overwrite").addEventListener("click", () => saveAlgorithmPreset(true));
+  $("start-run").addEventListener("click", startRun);
+  $("refresh-runs").addEventListener("click", loadRuns);
+  $("load-run").addEventListener("click", loadRunDetails);
+  $("metric-search").addEventListener("input", renderMetricList);
+  $("reset-plot-zoom").addEventListener("click", () => {
+    state.plotZoom = null;
+    renderInteractivePlots();
+  });
+  $("plot-selected").addEventListener("click", plotSelectedMetrics);
+
+  const canvas = $("roi-canvas");
+  canvas.addEventListener("mousedown", handleCanvasDown);
+  canvas.addEventListener("mousemove", handleCanvasMove);
+  window.addEventListener("mouseup", handleCanvasUp);
+}
+
+async function init() {
+  bindEvents();
+  syncRangeVisibility();
+  await loadDatasets();
+  await loadAlgorithmPresets();
+  await loadRuns();
+  drawRoiCanvas();
+}
+
+init().catch((error) => {
+  console.error(error);
+  setStatus("range-summary", error.message, "error");
+});

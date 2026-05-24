@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Image Sequence Difference Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Image Sequence Difference Analysis</h1>
+        <p>Server-side TIFF indexing, ROI selection, reference-image processing, and result plotting.</p>
+      </div>
+      <div class="top-actions">
+        <button id="reset-workflow" class="reset-button" type="button">Reset All</button>
+        <nav class="tabs">
+          <button class="tab-button active" data-tab="run-tab">Run Analysis</button>
+          <button class="tab-button" data-tab="results-tab">Load Results</button>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section id="run-tab" class="tab-panel active">
+        <div class="workflow-layout">
+          <aside class="workflow-nav" aria-label="Run workflow">
+            <button class="run-step-button active" data-step="dataset-step" type="button">
+              <strong>Dataset</strong>
+              <span>Index and time range</span>
+              <span class="step-status" aria-hidden="true"></span>
+            </button>
+            <button class="run-step-button" data-step="roi-step" type="button">
+              <strong>ROI</strong>
+              <span>Corners and grid</span>
+              <span class="step-status" aria-hidden="true"></span>
+            </button>
+            <button class="run-step-button" data-step="algorithm-step" type="button">
+              <strong>Algorithm</strong>
+              <span>Processing parameters</span>
+              <span class="step-status" aria-hidden="true"></span>
+            </button>
+            <button class="run-step-button" data-step="execute-step" type="button">
+              <strong>Run</strong>
+              <span>Progress and output</span>
+              <span class="step-status" aria-hidden="true"></span>
+            </button>
+          </aside>
+
+          <div class="workflow-content">
+            <section id="dataset-step" class="panel run-step-panel active">
+              <div class="panel-header">
+                <h2>Dataset and Time Range</h2>
+                <div class="button-row panel-actions">
+                  <button id="refresh-datasets" type="button">Refresh</button>
+                  <button id="index-dataset" class="confirm-button" type="button">Confirm Dataset</button>
+                </div>
+              </div>
+              <div class="grid two">
+                <label>
+                  Dataset
+                  <select id="dataset-select"></select>
+                </label>
+              </div>
+
+              <div class="range-bar">
+                <div class="radio-row">
+                  <label><input type="radio" name="time-mode" value="complete" checked /> Complete available range</label>
+                  <label><input type="radio" name="time-mode" value="custom" /> Custom range</label>
+                </div>
+                <div id="custom-range-fields" class="timestamp-picker" hidden>
+                  <div class="grid four compact-grid">
+                    <label>
+                      Start date
+                      <select id="range-start-date"></select>
+                    </label>
+                    <label>
+                      Start time
+                      <select id="range-start-time"></select>
+                    </label>
+                    <label>
+                      End date
+                      <select id="range-end-date"></select>
+                    </label>
+                    <label>
+                      End time
+                      <select id="range-end-time"></select>
+                    </label>
+                  </div>
+                  <div class="grid two compact-grid">
+                    <label>
+                      Start timestamp
+                      <input id="range-start-display" type="text" readonly />
+                    </label>
+                    <label>
+                      End timestamp
+                      <input id="range-end-display" type="text" readonly />
+                    </label>
+                  </div>
+                  <input id="range-start" type="hidden" />
+                  <input id="range-end" type="hidden" />
+                  <div id="timestamp-picker-help" class="timestamp-picker-help"></div>
+                </div>
+              </div>
+
+              <div id="range-summary" class="status-box"></div>
+
+              <details class="collapsible" open>
+                <summary>Dataset details</summary>
+                <dl id="dataset-details" class="details"></dl>
+              </details>
+            </section>
+
+            <section id="roi-step" class="panel run-step-panel">
+              <div class="panel-header">
+                <h2>Quadrilateral ROI</h2>
+                <div class="button-row panel-actions">
+                  <button id="load-preview" type="button" disabled>Load First Image</button>
+                  <button id="confirm-roi" class="confirm-button" type="button">Confirm ROI</button>
+                </div>
+              </div>
+              <div class="grid two compact-grid">
+                <label>
+                  <span class="label-heading">
+                    Grid size
+                    <span
+                      class="info-tip"
+                      tabindex="0"
+                      data-tooltip="Splits the confirmed quadrilateral ROI into grid_size x grid_size cells that follow the ROI geometry."
+                    >i</span>
+                  </span>
+                  <input id="grid-size" type="number" min="1" step="1" value="3" />
+                </label>
+                <div id="roi-status" class="status-box"></div>
+              </div>
+
+              <details class="collapsible">
+                <summary>ROI presets</summary>
+                <div class="grid three">
+                  <label>
+                    ROI preset
+                    <select id="roi-preset-select"></select>
+                  </label>
+                  <label>
+                    Preset name
+                    <input id="roi-preset-name" type="text" placeholder="roi_01" />
+                  </label>
+                  <label>
+                    <span class="label-heading">
+                      Preset scope
+                      <span
+                        class="info-tip"
+                        tabindex="0"
+                        data-tooltip="Selected dataset saves the ROI only for the active dataset. Global makes the ROI available for any dataset with compatible image geometry."
+                      >i</span>
+                    </span>
+                    <select id="roi-scope">
+                      <option value="dataset">Selected dataset</option>
+                      <option value="global">Global</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Comment
+                  <input id="roi-comment" type="text" />
+                </label>
+                <div class="button-row">
+                  <button id="apply-roi-preset" type="button">Apply Preset</button>
+                  <button id="save-roi-new" type="button">Save New ROI</button>
+                  <button id="save-roi-overwrite" type="button">Overwrite ROI</button>
+                </div>
+              </details>
+
+              <div class="canvas-wrap">
+                <canvas id="roi-canvas" width="900" height="600"></canvas>
+              </div>
+            </section>
+
+            <section id="algorithm-step" class="panel run-step-panel">
+              <div class="panel-header">
+                <h2>Algorithm Configuration</h2>
+                <div class="button-row panel-actions">
+                  <button id="reload-algorithm-presets" type="button">Reload Presets</button>
+                  <button id="confirm-algorithm" class="confirm-button" type="button">Confirm Algorithm</button>
+                </div>
+              </div>
+              <details class="collapsible">
+                <summary>Algorithm presets</summary>
+                <div class="grid three">
+                  <label>
+                    Algorithm preset
+                    <select id="algorithm-preset-select"></select>
+                  </label>
+                  <label>
+                    Save preset name
+                    <input id="algorithm-preset-name" type="text" placeholder="default_3x3" />
+                  </label>
+                  <label>
+                    Preset comment
+                    <input id="algorithm-comment" type="text" />
+                  </label>
+                </div>
+                <div class="button-row">
+                  <button id="apply-algorithm-preset" type="button">Apply Preset</button>
+                  <button id="save-algorithm-new" type="button">Save New Preset</button>
+                  <button id="save-algorithm-overwrite" type="button">Overwrite Preset</button>
+                </div>
+              </details>
+              <div id="algorithm-form" class="grid four algorithm-grid"></div>
+            </section>
+
+            <section id="execute-step" class="panel run-step-panel">
+              <div class="panel-header">
+                <h2>Run</h2>
+                <button id="start-run" type="button" disabled>Run Algorithm</button>
+              </div>
+              <div id="run-progress" class="progress-box">
+                <div class="progress-bar"><span id="progress-fill"></span></div>
+                <dl id="progress-details" class="details compact"></dl>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="results-tab" class="tab-panel">
+        <section class="panel compact-panel">
+          <div class="panel-header">
+            <h2>Previous Runs</h2>
+            <button id="refresh-runs" type="button">Refresh Runs</button>
+          </div>
+          <div class="grid two">
+            <label>
+              Run folder
+              <select id="run-select"></select>
+            </label>
+            <div class="button-row align-end">
+              <button id="load-run" type="button">Load Run</button>
+            </div>
+          </div>
+        </section>
+
+        <details class="panel collapsible result-config">
+          <summary>Run configuration</summary>
+          <div class="grid three">
+            <pre id="run-config-view"></pre>
+            <pre id="dataset-config-view"></pre>
+            <pre id="roi-config-view"></pre>
+          </div>
+        </details>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Plot Metrics</h2>
+            <button id="plot-selected" type="button">Save Plot PNG</button>
+          </div>
+          <label>
+            Search metrics
+            <input id="metric-search" type="search" placeholder="p95, affected, cell_001..." />
+          </label>
+          <div id="metric-list" class="metric-list"></div>
+          <div class="plot-toolbar">
+            <button id="reset-plot-zoom" type="button">Reset Zoom</button>
+          </div>
+          <div id="interactive-plots" class="interactive-plots"></div>
+          <div id="plot-status" class="status-box"></div>
+          <img id="result-plot" alt="Selected metric plot" />
+        </section>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

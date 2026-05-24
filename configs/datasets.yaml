@@ -1,0 +1,29 @@
+datasets:
+  - name: "synthetic_test"
+    folders:
+      - "sample_data/synthetic_test/phase_01"
+      - "sample_data/synthetic_test/phase_02"
+    start_time: "2025-03-01 08:00:00"
+    end_time: "2025-03-02 03:55:00"
+    description: "Generated local TIFF sequence for UI and algorithm testing"
+    timestamp_regex: "(\\d{8}_\\d{6})"
+    timestamp_format: "%Y%m%d_%H%M%S"
+
+  - name: "dataset_01"
+    folders:
+      - "/data/images/phase_01"
+      - "/data/images/phase_02"
+    start_time: "2025-01-01 08:00:00"
+    end_time: "2025-01-08 18:00:00"
+    description: "First recording block"
+    timestamp_regex: "(\\d{8}_\\d{6})"
+    timestamp_format: "%Y%m%d_%H%M%S"
+
+  - name: "dataset_02"
+    folders:
+      - "/data/images/phase_03"
+    start_time: "2025-02-10 06:00:00"
+    end_time: "2025-02-15 22:00:00"
+    description: "Second recording block"
+    timestamp_regex: "(\\d{8}_\\d{6})"
+    timestamp_format: "%Y%m%d_%H%M%S"

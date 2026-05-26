@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
@@ -31,6 +33,22 @@ DEFAULT_PLOT_METRICS = [
 ]
 
 
+@dataclass(slots=True)
+class MetricRegions:
+    """Precomputed flat pixel indices for fast repeated metric extraction."""
+
+    full_indices: np.ndarray
+    cell_indices: dict[str, np.ndarray]
+
+
+def build_metric_regions(full_mask: np.ndarray, cell_masks: dict[str, np.ndarray]) -> MetricRegions:
+    """Convert boolean masks to flat indices once per image shape/grid."""
+    return MetricRegions(
+        full_indices=np.flatnonzero(full_mask.ravel()),
+        cell_indices={name: np.flatnonzero(mask.ravel()) for name, mask in cell_masks.items()},
+    )
+
+
 def compute_difference_metrics(
     diff: np.ndarray,
     full_mask: np.ndarray,
@@ -38,14 +56,31 @@ def compute_difference_metrics(
     threshold: float,
 ) -> dict[str, float]:
     """Compute global, per-cell, and summary regional metrics."""
+    regions = build_metric_regions(full_mask, cell_masks)
+    return compute_difference_metrics_from_indices(
+        diff=diff,
+        full_indices=regions.full_indices,
+        cell_indices=regions.cell_indices,
+        threshold=threshold,
+    )
+
+
+def compute_difference_metrics_from_indices(
+    diff: np.ndarray,
+    full_indices: np.ndarray,
+    cell_indices: dict[str, np.ndarray],
+    threshold: float,
+) -> dict[str, float]:
+    """Compute metrics using precomputed flat ROI/cell indices."""
     metrics: dict[str, float] = {}
-    roi_values = diff[full_mask]
+    flat_diff = diff.ravel()
+    roi_values = flat_diff[full_indices]
     metrics.update(_basic_metrics(roi_values, threshold, prefix=""))
 
     cell_p95_values: list[float] = []
     affected_count = 0
-    for name, mask in cell_masks.items():
-        values = diff[mask]
+    for name, indices in cell_indices.items():
+        values = flat_diff[indices]
         cell_metrics = _basic_cell_metrics(values, threshold)
         for key, value in cell_metrics.items():
             metrics[f"{name}_{key}"] = value
@@ -62,7 +97,7 @@ def compute_difference_metrics(
     else:
         metrics["max_cell_p95_abs_diff"] = float("nan")
         metrics["top2_cell_p95_abs_diff_mean"] = float("nan")
-    total_cells = max(1, len(cell_masks))
+    total_cells = max(1, len(cell_indices))
     metrics["affected_cell_count"] = float(affected_count)
     metrics["affected_cell_ratio"] = float(affected_count / total_cells)
     return metrics

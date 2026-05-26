@@ -41,6 +41,7 @@ const algorithmFields = [
   ["image_downscale_factor", "number", "Image downscale factor", 0.001, 0.05],
   ["use_median_reference", "checkbox", "Use median reference", null, null],
   ["reference_refresh_interval_minutes", "number", "Reference refresh minutes", 0, 1],
+  ["image_cache_size_images", "number", "Image cache size images", 0, 1],
   ["grid_size", "number", "Grid size", 1, 1],
   ["output_directory", "text", "Output directory", null, null],
   ["save_preview_images", "checkbox", "Save preview images", null, null],
@@ -62,11 +63,13 @@ const algorithmHelp = {
   smoothing_window_images:
     "Rolling smoothing window applied to numeric output metrics. A value of 1 disables smoothing.",
   image_downscale_factor:
-    "Scale factor applied while loading images. Use 1.0 for full resolution; values below 1.0 reduce memory and runtime.",
+    "Scale factor applied while loading images. Keep 1.0 for identical full-resolution analysis; values below 1.0 downscale images and change results.",
   use_median_reference:
     "Use a pixelwise median for the reference image instead of a mean. Median is more robust to short transient changes.",
   reference_refresh_interval_minutes:
     "How long a computed reference image is reused before it is rebuilt. 0 recomputes the reference for every processed image; 60 refreshes roughly hourly.",
+  image_cache_size_images:
+    "Maximum number of decoded images kept in RAM for CPU runs or VRAM for GPU runs. Larger values reduce repeated TIFF reads for overlapping windows but use more memory. 0 disables caching.",
   grid_size:
     "Splits the quadrilateral ROI into grid_size x grid_size cells that follow the ROI geometry.",
   output_directory:

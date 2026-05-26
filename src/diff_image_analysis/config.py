@@ -78,6 +78,7 @@ class AlgorithmConfig:
     image_downscale_factor: float = 1.0
     use_median_reference: bool = False
     reference_refresh_interval_minutes: float = 0.0
+    image_cache_size_images: int = 1024
     grid_size: int = 3
     compute_backend: str = "gpu"
     output_directory: str = "outputs/runs"
@@ -101,6 +102,7 @@ class AlgorithmConfig:
             image_downscale_factor=float(merged["image_downscale_factor"]),
             use_median_reference=bool(merged["use_median_reference"]),
             reference_refresh_interval_minutes=float(merged["reference_refresh_interval_minutes"]),
+            image_cache_size_images=int(merged["image_cache_size_images"]),
             grid_size=int(merged["grid_size"]),
             compute_backend=str(merged.get("compute_backend", "gpu")).strip().lower() or "gpu",
             output_directory=str(merged["output_directory"]),
@@ -129,6 +131,8 @@ class AlgorithmConfig:
             raise ValueError("image_downscale_factor must be > 0")
         if self.reference_refresh_interval_minutes < 0:
             raise ValueError("reference_refresh_interval_minutes must be >= 0")
+        if self.image_cache_size_images < 0:
+            raise ValueError("image_cache_size_images must be >= 0")
         if self.compute_backend not in {"cpu", "gpu"}:
             raise ValueError("compute_backend must be 'cpu' or 'gpu'")
         if self.preview_image_count < 0:

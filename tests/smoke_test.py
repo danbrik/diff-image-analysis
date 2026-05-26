@@ -71,6 +71,7 @@ def main() -> None:
                 image_downscale_factor=1.0,
                 use_median_reference=False,
                 reference_refresh_interval_minutes=0.0 if grid_size == 3 else 5.0,
+                image_cache_size_images=8,
                 grid_size=grid_size,
                 compute_backend="cpu",
                 output_directory=str(temp_root / "outputs" / "runs"),

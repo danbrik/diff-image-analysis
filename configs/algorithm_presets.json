@@ -10,6 +10,7 @@
     "image_downscale_factor": 1.0,
     "use_median_reference": false,
     "reference_refresh_interval_minutes": 0.0,
+    "image_cache_size_images": 1024,
     "grid_size": 3,
     "compute_backend": "gpu",
     "output_directory": "outputs/runs",
@@ -27,9 +28,10 @@
     "processing_stride_images": 1,
     "difference_threshold_abs": 28.0,
     "smoothing_window_images": 3,
-    "image_downscale_factor": 0.5,
+    "image_downscale_factor": 1.0,
     "use_median_reference": false,
     "reference_refresh_interval_minutes": 60.0,
+    "image_cache_size_images": 1024,
     "grid_size": 5,
     "compute_backend": "gpu",
     "output_directory": "outputs/runs",
@@ -37,6 +39,27 @@
     "preview_image_count": 2,
     "run_name": "synthetic_demo",
     "created_at": "2026-05-24 00:00:00",
-    "comment": "Fast demo preset for the generated synthetic_test dataset."
+    "comment": "Full-quality demo preset for the generated synthetic_test dataset."
+  },
+  {
+    "preset_name": "v100_full_quality",
+    "reference_window_size_images": 12,
+    "reference_gap_images": 2,
+    "live_average_size_images": 1,
+    "processing_stride_images": 1,
+    "difference_threshold_abs": 25.0,
+    "smoothing_window_images": 1,
+    "image_downscale_factor": 1.0,
+    "use_median_reference": false,
+    "reference_refresh_interval_minutes": 60.0,
+    "image_cache_size_images": 1024,
+    "grid_size": 5,
+    "compute_backend": "gpu",
+    "output_directory": "outputs/runs",
+    "save_preview_images": false,
+    "preview_image_count": 0,
+    "run_name": "v100_full_quality",
+    "created_at": "2026-05-26 00:00:00",
+    "comment": "Optimized full-resolution preset for Tesla V100 32 GB VRAM and 64 GB RAM."
   }
 ]

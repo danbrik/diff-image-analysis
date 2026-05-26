@@ -8,7 +8,7 @@ Browser-based Python application for server-side analysis of local TIFF image se
 - **Plain JavaScript canvas**: reliable four-corner ROI editing in the browser without a desktop GUI or image uploads.
 - **tifffile + imagecodecs**: direct TIFF reading, including common compressed TIFFs.
 - **NumPy + pandas**: efficient image math and tabular result output.
-- **Optional PyTorch/CUDA**: GPU mode can accelerate reference/live image reductions and difference image creation when a CUDA build of PyTorch is available. The intended GPU runtime is `torch==2.6.0+cu124` and `torchvision==0.21.0+cu124` for CUDA 12.4; these packages are intentionally not installed by `requirements.txt`.
+- **Optional PyTorch/CUDA**: GPU mode can keep decoded image tensors, reference/live reductions, difference images, ROI masks, and metric calculations on CUDA when a compatible PyTorch build is available. The intended GPU runtime is `torch==2.6.0+cu124` and `torchvision==0.21.0+cu124` for CUDA 12.4; these packages are intentionally not installed by `requirements.txt`.
 - **Pillow**: preview PNGs, ROI mask rasterization, and overlay images.
 - **Matplotlib**: server-side summary plots saved as PNG files.
 
@@ -81,6 +81,7 @@ The repository also includes presets for a quick demo run:
 
 - ROI preset: `synthetic_demo_roi`
 - Algorithm preset: `synthetic_quick_5x5`
+- Algorithm preset for full-quality GPU runs: `v100_full_quality`
 
 For a demo run, select `synthetic_test`, index it, load the first image, apply `synthetic_demo_roi`, apply `synthetic_quick_5x5`, and run the algorithm. Use **Reset All** in the header to clear the current UI configuration and return to the first workflow step.
 
@@ -129,8 +130,10 @@ Algorithm presets are saved in `configs/algorithm_presets.json`. Presets include
 - absolute difference threshold
 - smoothing window
 - image downscale factor
+- keep `image_downscale_factor` at `1.0` for identical full-resolution analysis; lower values intentionally downscale and change the result
 - mean or median reference mode
 - reference refresh interval in minutes; `0` recomputes the reference for every processed image, while values such as `60` reuse a reference image for roughly one hour before rebuilding it
+- decoded image cache size; this LRU cache avoids repeatedly reading the same overlapping TIFF windows from disk, using RAM in CPU mode and VRAM in GPU mode
 - grid size
 - compute backend, saved in run configs as `gpu` or `cpu`
 - output directory

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+from .compute import ComputeContext, get_compute_context, torch_module
 from .config import AlgorithmConfig, DatasetConfig, dataset_config_json, format_datetime
 from .image_io import load_image_float32, normalize_for_display
 from .indexing import filter_records_by_time
@@ -34,6 +35,16 @@ class RunResult:
     summary_plot: Path
 
 
+@dataclass(slots=True)
+class ReferenceCache:
+    """Cached reference image reused until the configured refresh interval expires."""
+
+    image: np.ndarray
+    anchor_timestamp: datetime
+    ref_start: int
+    ref_end: int
+
+
 def run_difference_analysis(
     all_records: pd.DataFrame,
     dataset: DatasetConfig,
@@ -47,6 +58,7 @@ def run_difference_analysis(
 ) -> RunResult:
     """Run the reference-image difference algorithm and persist run artifacts."""
     algorithm_config.validate()
+    compute_context = get_compute_context(algorithm_config.compute_backend)
     output_root = Path(algorithm_config.output_directory)
     run_folder = _make_run_folder(output_root, algorithm_config.run_name)
     run_folder.mkdir(parents=True, exist_ok=True)
@@ -59,6 +71,11 @@ def run_difference_analysis(
     logs.append(f"roi_preset: {selected_roi_preset or '(unspecified)'}")
     logs.append(f"range_start: {format_datetime(range_start)}")
     logs.append(f"range_end: {format_datetime(range_end)}")
+    logs.append(f"compute_backend: {compute_context.backend}")
+    logs.append(f"compute_device: {compute_context.device_name or compute_context.device}")
+    logs.append(
+        f"reference_refresh_interval_minutes: {algorithm_config.reference_refresh_interval_minutes}"
+    )
 
     missing_timestamps = int(all_records["timestamp"].isna().sum()) if not all_records.empty else 0
     if missing_timestamps:
@@ -84,6 +101,7 @@ def run_difference_analysis(
     corners_original = corners_dict_to_array(roi_config["corners"])
     rows: list[dict[str, Any]] = []
     masks_cache: dict[tuple[int, int], Any] = {}
+    reference_cache: ReferenceCache | None = None
     preview_saved = 0
 
     for selected_order, selected_row in selected.iterrows():
@@ -106,7 +124,9 @@ def run_difference_analysis(
             "current_image_index": source_index,
             "current_timestamp": format_datetime(timestamp),
             "percentage": float(selected_order / total_selected * 100.0),
-            "status_message": status_message,
+            "status_message": f"{status_message} on {compute_context.backend}",
+            "compute_backend": compute_context.backend,
+            "compute_device": compute_context.device_name or compute_context.device,
         }
         _emit(progress_callback, progress_payload)
 
@@ -134,7 +154,7 @@ def run_difference_analysis(
                 load_image_float32(path, algorithm_config.image_downscale_factor)
                 for path in live_paths
             ]
-            live_image = live_images[-1] if len(live_images) == 1 else np.mean(live_images, axis=0)
+            live_image = _build_live_image(live_images, compute_context)
         except Exception as exc:
             status = "unreadable_live_window"
             rows.append({**base_row, "status": status})
@@ -142,16 +162,35 @@ def run_difference_analysis(
             continue
 
         try:
-            ref_paths = timestamped_all.iloc[ref_start : ref_end + 1]["image_path"].tolist()
-            ref_images = [
-                load_image_float32(path, algorithm_config.image_downscale_factor)
-                for path in ref_paths
-            ]
-            ref_stack = np.stack(ref_images, axis=0)
-            if algorithm_config.use_median_reference:
-                reference_image = np.median(ref_stack, axis=0).astype(np.float32)
+            if _reference_needs_refresh(
+                reference_cache,
+                timestamp,
+                algorithm_config.reference_refresh_interval_minutes,
+            ):
+                ref_paths = timestamped_all.iloc[ref_start : ref_end + 1]["image_path"].tolist()
+                ref_images = [
+                    load_image_float32(path, algorithm_config.image_downscale_factor)
+                    for path in ref_paths
+                ]
+                reference_image = _build_reference_image(
+                    ref_images,
+                    use_median=algorithm_config.use_median_reference,
+                    compute_context=compute_context,
+                )
+                reference_cache = ReferenceCache(
+                    image=reference_image,
+                    anchor_timestamp=timestamp,
+                    ref_start=ref_start,
+                    ref_end=ref_end,
+                )
+                if algorithm_config.reference_refresh_interval_minutes > 0:
+                    logs.append(
+                        "reference_refresh: "
+                        f"index={source_index} timestamp={format_datetime(timestamp)} "
+                        f"ref_start={ref_start} ref_end={ref_end}"
+                    )
             else:
-                reference_image = np.mean(ref_stack, axis=0).astype(np.float32)
+                reference_image = reference_cache.image
         except Exception as exc:
             status = "unreadable_reference_window"
             rows.append({**base_row, "status": status})
@@ -181,7 +220,7 @@ def run_difference_analysis(
             logs.append(f"empty_roi: index={source_index}")
             continue
 
-        diff = np.abs(live_image.astype(np.float32) - reference_image.astype(np.float32))
+        diff = _compute_diff(live_image, reference_image, compute_context)
         metrics = compute_difference_metrics(
             diff=diff,
             full_mask=masks.full_mask,
@@ -224,10 +263,80 @@ def run_difference_analysis(
             "current_timestamp": format_datetime(selected.iloc[-1]["timestamp"].to_pydatetime()),
             "percentage": 100.0,
             "status_message": "finished",
+            "compute_backend": compute_context.backend,
+            "compute_device": compute_context.device_name or compute_context.device,
         },
     )
     _finish_log(run_folder, logs, start_time)
     return RunResult(run_folder=run_folder, results_csv=results_csv, summary_plot=summary_plot)
+
+
+def _reference_needs_refresh(
+    cache: ReferenceCache | None,
+    timestamp: datetime,
+    refresh_interval_minutes: float,
+) -> bool:
+    """Return True when the reference image should be rebuilt for this timestamp."""
+    if cache is None or refresh_interval_minutes <= 0:
+        return True
+    elapsed_minutes = (timestamp - cache.anchor_timestamp).total_seconds() / 60.0
+    return elapsed_minutes >= refresh_interval_minutes
+
+
+def _build_live_image(images: list[np.ndarray], compute_context: ComputeContext) -> np.ndarray:
+    """Build the live image on the selected compute backend."""
+    if len(images) == 1:
+        return images[-1].astype(np.float32, copy=False)
+    return _reduce_images(images, use_median=False, compute_context=compute_context)
+
+
+def _build_reference_image(
+    images: list[np.ndarray],
+    use_median: bool,
+    compute_context: ComputeContext,
+) -> np.ndarray:
+    """Build a mean or median reference image on the selected compute backend."""
+    return _reduce_images(images, use_median=use_median, compute_context=compute_context)
+
+
+def _reduce_images(
+    images: list[np.ndarray],
+    use_median: bool,
+    compute_context: ComputeContext,
+) -> np.ndarray:
+    if compute_context.backend == "gpu":
+        torch = torch_module()
+        with torch.no_grad():
+            tensors = [
+                torch.as_tensor(image, dtype=torch.float32, device=compute_context.device)
+                for image in images
+            ]
+            stack = torch.stack(tensors, dim=0)
+            if use_median:
+                reduced = torch.median(stack, dim=0).values
+            else:
+                reduced = torch.mean(stack, dim=0)
+            return reduced.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    stack = np.stack(images, axis=0)
+    if use_median:
+        return np.median(stack, axis=0).astype(np.float32)
+    return np.mean(stack, axis=0).astype(np.float32)
+
+
+def _compute_diff(
+    live_image: np.ndarray,
+    reference_image: np.ndarray,
+    compute_context: ComputeContext,
+) -> np.ndarray:
+    """Compute absolute difference on the selected compute backend."""
+    if compute_context.backend == "gpu":
+        torch = torch_module()
+        with torch.no_grad():
+            live = torch.as_tensor(live_image, dtype=torch.float32, device=compute_context.device)
+            reference = torch.as_tensor(reference_image, dtype=torch.float32, device=compute_context.device)
+            return torch.abs(live - reference).detach().cpu().numpy().astype(np.float32, copy=False)
+    return np.abs(live_image.astype(np.float32) - reference_image.astype(np.float32))
 
 
 def _smooth_results(results: pd.DataFrame, window: int) -> pd.DataFrame:

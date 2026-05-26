@@ -8,6 +8,7 @@ Browser-based Python application for server-side analysis of local TIFF image se
 - **Plain JavaScript canvas**: reliable four-corner ROI editing in the browser without a desktop GUI or image uploads.
 - **tifffile + imagecodecs**: direct TIFF reading, including common compressed TIFFs.
 - **NumPy + pandas**: efficient image math and tabular result output.
+- **Optional PyTorch/CUDA**: GPU mode can accelerate reference/live image reductions and difference image creation when a CUDA build of PyTorch is available. The intended GPU runtime is `torch==2.6.0+cu124` and `torchvision==0.21.0+cu124` for CUDA 12.4; these packages are intentionally not installed by `requirements.txt`.
 - **Pillow**: preview PNGs, ROI mask rasterization, and overlay images.
 - **Matplotlib**: server-side summary plots saved as PNG files.
 
@@ -101,7 +102,8 @@ The app listens on `0.0.0.0:8050` by default.
 5. Choose `grid_size`, default `3`. A `9` value creates an 81-cell ROI-following grid.
 6. Open **ROI presets** only when you want to load, save, or overwrite presets.
 7. In **Algorithm**, edit parameters directly or open **Algorithm presets** to load or save a preset, then click **Confirm Algorithm**.
-8. In **Run**, click **Run Algorithm** and watch the progress panel. The run button stays disabled until Dataset, ROI, and Algorithm all show a green check in the workflow navigation.
+8. In **Run**, choose **GPU (CUDA)** or **CPU**. GPU is selected by default. Use **Check GPU** to verify PyTorch/CUDA availability; if GPU is selected and CUDA is unavailable, the run returns an error instead of silently falling back to CPU.
+9. Click **Run Algorithm** and watch the progress panel. The run button stays disabled until Dataset, ROI, and Algorithm all show a green check in the workflow navigation.
 
 ## ROI Presets
 
@@ -128,7 +130,9 @@ Algorithm presets are saved in `configs/algorithm_presets.json`. Presets include
 - smoothing window
 - image downscale factor
 - mean or median reference mode
+- reference refresh interval in minutes; `0` recomputes the reference for every processed image, while values such as `60` reuse a reference image for roughly one hour before rebuilding it
 - grid size
+- compute backend, saved in run configs as `gpu` or `cpu`
 - output directory
 - preview image settings
 - optional run name and comment

@@ -27,6 +27,7 @@ from diff_image_analysis.config import (  # noqa: E402
     algorithm_preset_payload,
     parse_datetime,
 )
+from diff_image_analysis.compute import check_gpu_status  # noqa: E402
 from diff_image_analysis.image_io import preview_png_bytes  # noqa: E402
 from diff_image_analysis.indexing import dataset_summary, filter_records_by_time, index_dataset  # noqa: E402
 from diff_image_analysis.metrics import DEFAULT_PLOT_METRICS  # noqa: E402
@@ -184,6 +185,11 @@ def api_algorithm_presets() -> Any:
     return jsonify({"presets": presets, "defaults": AlgorithmConfig().to_dict()})
 
 
+@app.get("/api/compute/gpu-status")
+def api_gpu_status() -> Any:
+    return jsonify(check_gpu_status())
+
+
 @app.post("/api/algorithm-presets")
 def api_save_algorithm_preset() -> Any:
     data = request.get_json(force=True)
@@ -208,6 +214,10 @@ def api_start_run() -> Any:
         abort(400, description="Selected time range contains no timestamped images")
 
     algorithm_config = AlgorithmConfig.from_dict(data.get("algorithm_config", {}))
+    if algorithm_config.compute_backend == "gpu":
+        gpu_status = check_gpu_status()
+        if not gpu_status["available"]:
+            return jsonify({"error": gpu_status["message"], "gpu_status": gpu_status}), 400
     output_root = Path(algorithm_config.output_directory)
     if not output_root.is_absolute():
         output_root = ROOT / output_root
@@ -226,6 +236,8 @@ def api_start_run() -> Any:
                 "processed_images": 0,
                 "percentage": 0.0,
                 "status_message": "queued",
+                "compute_backend": algorithm_config.compute_backend,
+                "compute_device": "gpu" if algorithm_config.compute_backend == "gpu" else "cpu",
             },
             "result": None,
             "error": None,

@@ -214,6 +214,26 @@
                 <h2>Run</h2>
                 <button id="start-run" type="button" disabled>Run Algorithm</button>
               </div>
+              <div class="grid two compact-grid run-controls">
+                <label>
+                  <span class="label-heading">
+                    Compute backend
+                    <span
+                      class="info-tip"
+                      tabindex="0"
+                      data-tooltip="GPU uses PyTorch/CUDA for reference/live image reductions and difference images. CPU keeps all processing in NumPy. GPU is selected by default and errors if CUDA is unavailable."
+                    >i</span>
+                  </span>
+                  <select id="compute-backend">
+                    <option value="gpu" selected>GPU (CUDA)</option>
+                    <option value="cpu">CPU</option>
+                  </select>
+                </label>
+                <div class="button-row align-end">
+                  <button id="check-gpu" type="button">Check GPU</button>
+                </div>
+              </div>
+              <div id="gpu-status" class="status-box"></div>
               <div id="run-progress" class="progress-box">
                 <div class="progress-bar"><span id="progress-fill"></span></div>
                 <dl id="progress-details" class="details compact"></dl>

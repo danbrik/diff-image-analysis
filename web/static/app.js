@@ -22,6 +22,7 @@ const state = {
   selectedMetrics: [],
   resultRows: [],
   plotZoom: null,
+  gpuStatus: null,
   workflow: {
     dataset: false,
     roi: false,
@@ -39,6 +40,7 @@ const algorithmFields = [
   ["smoothing_window_images", "number", "Smoothing window images", 1, 1],
   ["image_downscale_factor", "number", "Image downscale factor", 0.001, 0.05],
   ["use_median_reference", "checkbox", "Use median reference", null, null],
+  ["reference_refresh_interval_minutes", "number", "Reference refresh minutes", 0, 1],
   ["grid_size", "number", "Grid size", 1, 1],
   ["output_directory", "text", "Output directory", null, null],
   ["save_preview_images", "checkbox", "Save preview images", null, null],
@@ -63,6 +65,8 @@ const algorithmHelp = {
     "Scale factor applied while loading images. Use 1.0 for full resolution; values below 1.0 reduce memory and runtime.",
   use_median_reference:
     "Use a pixelwise median for the reference image instead of a mean. Median is more robust to short transient changes.",
+  reference_refresh_interval_minutes:
+    "How long a computed reference image is reused before it is rebuilt. 0 recomputes the reference for every processed image; 60 refreshes roughly hourly.",
   grid_size:
     "Splits the quadrilateral ROI into grid_size x grid_size cells that follow the ROI geometry.",
   output_directory:
@@ -85,8 +89,14 @@ async function fetchJson(url, options = {}) {
     ...options,
   });
   if (!response.ok) {
+    const contentType = response.headers.get("Content-Type") || "";
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      throw new Error(payload.error || payload.message || `${response.status} ${response.statusText}`);
+    }
     const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
+    const cleanText = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    throw new Error(cleanText || `${response.status} ${response.statusText}`);
   }
   return response.json();
 }
@@ -94,7 +104,7 @@ async function fetchJson(url, options = {}) {
 function setStatus(id, message, kind = "") {
   const el = $(id);
   el.textContent = message || "";
-  el.classList.remove("warning", "error");
+  el.classList.remove("warning", "error", "success");
   if (kind) el.classList.add(kind);
 }
 
@@ -464,6 +474,9 @@ function resetWorkflow() {
   $("algorithm-preset-name").value = "";
   $("algorithm-comment").value = "";
   $("roi-scope").value = "dataset";
+  $("compute-backend").value = "gpu";
+  state.gpuStatus = null;
+  setStatus("gpu-status", "");
   setStatus("plot-status", "");
   $("progress-fill").style.width = "0%";
   renderDetails("progress-details", []);
@@ -942,6 +955,9 @@ function applyAlgorithmPreset() {
   const preset = selectedAlgorithmPreset();
   if (!preset) return;
   renderAlgorithmForm({ ...state.algorithmDefaults, ...preset });
+  if (preset.compute_backend && $("compute-backend")) {
+    $("compute-backend").value = preset.compute_backend;
+  }
   $("algorithm-preset-name").value = preset.preset_name;
   $("algorithm-comment").value = preset.comment || "";
   markAlgorithmDirty();
@@ -960,6 +976,7 @@ function getAlgorithmConfig() {
     }
   }
   config.grid_size = getGridSize();
+  if ($("compute-backend")) config.compute_backend = $("compute-backend").value || "gpu";
   return config;
 }
 
@@ -1018,11 +1035,30 @@ function refreshRunButton() {
   );
 }
 
+async function checkGpuStatus() {
+  setStatus("gpu-status", "Checking GPU availability...");
+  try {
+    const data = await fetchJson("/api/compute/gpu-status");
+    state.gpuStatus = data;
+    const parts = [
+      data.message,
+      `Expected: torch ${data.expected_torch_version}, torchvision ${data.expected_torchvision_version}, CUDA ${data.expected_cuda_version}.`,
+    ];
+    if (data.available && !data.version_matches) {
+      parts.push("GPU is usable, but installed versions do not exactly match the expected CUDA 12.4 stack.");
+    }
+    setStatus("gpu-status", parts.filter(Boolean).join(" "), data.available ? (data.version_matches ? "success" : "warning") : "error");
+  } catch (error) {
+    setStatus("gpu-status", error.message, "error");
+  }
+}
+
 async function startRun() {
   if ($("start-run").disabled || !state.selectedDataset || !state.preview || !state.roiCorners) return;
   switchRunStep("execute-step");
   const mode = document.querySelector("input[name='time-mode']:checked").value;
   const algorithmConfig = getAlgorithmConfig();
+  algorithmConfig.compute_backend = $("compute-backend").value || "gpu";
   const roiPreset = selectedRoiPreset();
   const payload = {
     dataset_name: state.selectedDataset.name,
@@ -1042,11 +1078,22 @@ async function startRun() {
     },
   };
   $("start-run").disabled = true;
-  const data = await fetchJson("/api/runs", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  pollRun(data.job_id);
+  try {
+    const data = await fetchJson("/api/runs", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    pollRun(data.job_id);
+  } catch (error) {
+    setStatus("gpu-status", error.message, "error");
+    $("progress-fill").style.width = "0%";
+    renderDetails("progress-details", [
+      ["State", "failed"],
+      ["Compute backend", algorithmConfig.compute_backend],
+      ["Status", error.message],
+    ]);
+    refreshRunButton();
+  }
 }
 
 async function pollRun(jobId) {
@@ -1072,6 +1119,8 @@ function renderProgress(job) {
   renderDetails("progress-details", [
     ["State", job.state],
     ["Dataset", progress.dataset_name || ""],
+    ["Compute backend", progress.compute_backend || ""],
+    ["Compute device", progress.compute_device || ""],
     ["Total images", progress.total_images ?? ""],
     ["Processed images", progress.processed_images ?? ""],
     ["Current image index", progress.current_image_index ?? ""],
@@ -1402,6 +1451,17 @@ function bindEvents() {
   $("confirm-algorithm").addEventListener("click", confirmAlgorithm);
   $("save-algorithm-new").addEventListener("click", () => saveAlgorithmPreset(false));
   $("save-algorithm-overwrite").addEventListener("click", () => saveAlgorithmPreset(true));
+  $("compute-backend").addEventListener("change", () => {
+    const backend = $("compute-backend").value;
+    setStatus(
+      "gpu-status",
+      backend === "gpu"
+        ? "GPU selected. Use Check GPU to verify CUDA before running."
+        : "CPU selected. The run will not require PyTorch/CUDA.",
+      backend === "gpu" ? "warning" : ""
+    );
+  });
+  $("check-gpu").addEventListener("click", checkGpuStatus);
   $("start-run").addEventListener("click", startRun);
   $("refresh-runs").addEventListener("click", loadRuns);
   $("load-run").addEventListener("click", loadRunDetails);

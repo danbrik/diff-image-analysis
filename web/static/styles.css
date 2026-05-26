@@ -498,6 +498,16 @@ input[readonly] {
   color: var(--danger);
 }
 
+.status-box.success {
+  border-color: #8fd19e;
+  background: #effaf2;
+  color: #166534;
+}
+
+.run-controls {
+  margin-bottom: 12px;
+}
+
 .canvas-wrap {
   width: 100%;
   max-height: calc(100vh - 230px);

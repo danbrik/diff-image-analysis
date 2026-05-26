@@ -1,0 +1,71 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtual environments and local dependency folders
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Application outputs and local run artifacts
+outputs/
+!outputs/.gitkeep
+*.log
+processing_log.txt
+
+# Local/generated image datasets
+sample_data/
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+
+# Generated plots, previews, and reports
+selected_metrics_*.png
+summary_plot.png
+roi_grid_overlay.png
+reference_example*.png
+live_example*.png
+diff_example*.png
+results.csv
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local server/runtime files
+*.pid
+*.sock

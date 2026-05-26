@@ -127,6 +127,24 @@ button:disabled {
   border-color: #6b7280;
 }
 
+.danger-button {
+  color: #ffffff;
+  background: var(--danger);
+  border-color: var(--danger);
+  font-weight: 700;
+}
+
+.danger-button:hover {
+  background: #8f1d14;
+  border-color: #8f1d14;
+}
+
+.danger-button:disabled {
+  color: #d1d5db;
+  background: #6b7280;
+  border-color: #6b7280;
+}
+
 main {
   max-width: 1480px;
   margin: 0 auto;
@@ -529,6 +547,21 @@ input[readonly] {
 .progress-box {
   display: grid;
   gap: 14px;
+}
+
+.run-log-panel {
+  margin-top: 0;
+}
+
+.muted-inline {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+#run-log {
+  min-height: 120px;
+  max-height: 260px;
 }
 
 .progress-bar {

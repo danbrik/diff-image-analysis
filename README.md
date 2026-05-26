@@ -75,7 +75,7 @@ sample_data/synthetic_test/phase_01/
 sample_data/synthetic_test/phase_02/
 ```
 
-The sequence contains noise, slow brightness drift, a moving bright region, and a short local event so the difference metrics produce visible changes. After generation, restart the app if it was already running, select `synthetic_test`, and click **Confirm Dataset**.
+The sequence contains noise, slow brightness drift, a moving bright region, and a short local event so the difference metrics produce visible changes. After generation, restart the app if it was already running, select `synthetic_test`, click **Index Dataset**, choose the time range, and click **Confirm Dataset**.
 
 The repository also includes presets for a quick demo run:
 
@@ -83,7 +83,7 @@ The repository also includes presets for a quick demo run:
 - Algorithm preset: `synthetic_quick_5x5`
 - Algorithm preset for full-quality GPU runs: `v100_full_quality`
 
-For a demo run, select `synthetic_test`, index it, load the first image, apply `synthetic_demo_roi`, apply `synthetic_quick_5x5`, and run the algorithm. Use **Reset All** in the header to clear the current UI configuration and return to the first workflow step.
+For a demo run, select `synthetic_test`, click **Index Dataset**, use the complete available range, click **Confirm Dataset**, apply `synthetic_demo_roi`, apply `synthetic_quick_5x5`, and run the algorithm. Use **Reset All** in the header to clear the current UI configuration and return to the first workflow step.
 
 ## Start the App
 
@@ -98,13 +98,15 @@ The app listens on `0.0.0.0:8050` by default.
 
 1. Open the app in a browser.
 2. Use the left workflow navigation: **Dataset**, **ROI**, **Algorithm**, then **Run**.
-3. In **Dataset**, select a dataset, click **Confirm Dataset**, and choose the complete available range or a custom start/end timestamp. Custom timestamp controls are only shown when **Custom range** is selected; after indexing, their date and time options come from parsed image timestamps, so unavailable days and times are not selectable. After confirmation, the UI opens **ROI** and loads the first image automatically.
+3. In **Dataset**, select a dataset and click **Index Dataset**. Then choose the complete available range or a custom start/end timestamp and click **Confirm Dataset**. Custom timestamp controls are only shown when **Custom range** is selected; after indexing, their date options and minute-based time groups come from parsed image timestamps, so unavailable days and times are not selectable. End-minute selections include all images through that selected minute. After confirmation, the UI opens **ROI** and loads the first image automatically.
 4. In **ROI**, move the four ROI corner points on the preview image or apply an ROI preset, then click **Confirm ROI**.
 5. Choose `grid_size`, default `3`. A `9` value creates an 81-cell ROI-following grid.
 6. Open **ROI presets** only when you want to load, save, or overwrite presets.
 7. In **Algorithm**, edit parameters directly or open **Algorithm presets** to load or save a preset, then click **Confirm Algorithm**.
 8. In **Run**, choose **GPU (CUDA)** or **CPU**. GPU is selected by default. Use **Check GPU** to verify PyTorch/CUDA availability; if GPU is selected and CUDA is unavailable, the run returns an error instead of silently falling back to CPU.
-9. Click **Run Algorithm** and watch the progress panel. The run button stays disabled until Dataset, ROI, and Algorithm all show a green check in the workflow navigation.
+9. Click **Run Algorithm** and watch the progress panel. The run button stays disabled until Dataset, ROI, and Algorithm all show a green check in the workflow navigation. During a run, **Cancel Run** requests a cooperative stop; the app finishes the current processing step, writes the partial run artifacts, and marks the job as cancelled. The progress panel also shows a rough remaining-time estimate based on the recent progress rate. Open **Run log** to inspect coarse intermediate steps such as setup, cache initialization, mask preparation, reference refreshes, 5% progress marks, output writing, and final cache stats.
+
+The Flask process keeps one shared in-memory UI/job state. Opening the same URL in another browser window reconnects to the same selected configuration and any active run. Only one analysis run can be active at a time; a second start request is rejected until the current run finishes or is cancelled.
 
 ## ROI Presets
 

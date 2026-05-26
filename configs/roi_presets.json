@@ -35,24 +35,52 @@
       448
     ],
     "corners": {
-      "top_left": [
-        58.0,
-        68.0
-      ],
-      "top_right": [
-        388.0,
-        54.0
+      "bottom_left": [
+        46.0,
+        300.0
       ],
       "bottom_right": [
         414.0,
         286.0
       ],
+      "top_left": [
+        58.0,
+        68.0
+      ],
+      "top_right": [
+        352.0,
+        63.0
+      ]
+    },
+    "created_at": "2026-05-26 17:42:17",
+    "comment": "Synthetic demo ROI covering the moving blob and local event region."
+  },
+  {
+    "preset_name": "synthetic_demo_roi2",
+    "dataset_name": "synthetic_test",
+    "image_shape": [
+      320,
+      448
+    ],
+    "corners": {
       "bottom_left": [
         46.0,
         300.0
+      ],
+      "bottom_right": [
+        414.0,
+        286.0
+      ],
+      "top_left": [
+        58.0,
+        68.0
+      ],
+      "top_right": [
+        352.0,
+        63.0
       ]
     },
-    "created_at": "2026-05-24 00:00:00",
+    "created_at": "2026-05-26 17:42:23",
     "comment": "Synthetic demo ROI covering the moving blob and local event region."
   }
 ]

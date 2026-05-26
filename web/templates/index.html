@@ -53,7 +53,8 @@
                 <h2>Dataset and Time Range</h2>
                 <div class="button-row panel-actions">
                   <button id="refresh-datasets" type="button">Refresh</button>
-                  <button id="index-dataset" class="confirm-button" type="button">Confirm Dataset</button>
+                  <button id="index-dataset" type="button">Index Dataset</button>
+                  <button id="confirm-dataset" class="confirm-button" type="button">Confirm Dataset</button>
                 </div>
               </div>
               <div class="grid two">
@@ -212,7 +213,10 @@
             <section id="execute-step" class="panel run-step-panel">
               <div class="panel-header">
                 <h2>Run</h2>
-                <button id="start-run" type="button" disabled>Run Algorithm</button>
+                <div class="button-row panel-actions">
+                  <button id="start-run" type="button" disabled>Run Algorithm</button>
+                  <button id="cancel-run" class="danger-button" type="button" disabled>Cancel Run</button>
+                </div>
               </div>
               <div class="grid two compact-grid run-controls">
                 <label>
@@ -237,6 +241,10 @@
               <div id="run-progress" class="progress-box">
                 <div class="progress-bar"><span id="progress-fill"></span></div>
                 <dl id="progress-details" class="details compact"></dl>
+                <details class="collapsible run-log-panel">
+                  <summary>Run log <span id="run-log-count" class="muted-inline">0 entries</span></summary>
+                  <pre id="run-log"></pre>
+                </details>
               </div>
             </section>
           </div>

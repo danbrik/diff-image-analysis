@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 import json
@@ -53,6 +54,29 @@ PREVIEW_CACHE: dict[str, tuple[bytes, dict[str, Any]]] = {}
 JOBS: dict[str, dict[str, Any]] = {}
 RUN_ROOTS = {(ROOT / "outputs" / "runs").resolve()}
 STATE_LOCK = threading.Lock()
+RUNNING_JOB_STATES = {"running", "cancelling"}
+
+
+def _default_app_state() -> dict[str, Any]:
+    return {
+        "selected_dataset_name": None,
+        "time_mode": "complete",
+        "range_start": "",
+        "range_end": "",
+        "workflow": {"dataset": False, "roi": False, "algorithm": False},
+        "roi_corners": None,
+        "grid_size": 3,
+        "roi_preset_name": "",
+        "algorithm_config": AlgorithmConfig().to_dict(),
+        "algorithm_preset_name": "",
+        "compute_backend": "gpu",
+        "active_job_id": None,
+        "latest_job_id": None,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+APP_STATE: dict[str, Any] = _default_app_state()
 
 
 @app.get("/")
@@ -68,6 +92,27 @@ def api_datasets() -> Any:
         summary = dataset_summary(INDEX_CACHE[dataset.name]) if indexed else {}
         datasets.append({**dataset.to_dict(), "indexed": indexed, **summary})
     return jsonify({"datasets": datasets})
+
+
+@app.get("/api/app-state")
+def api_app_state() -> Any:
+    with STATE_LOCK:
+        return jsonify(_app_state_payload_locked())
+
+
+@app.patch("/api/app-state")
+def api_update_app_state() -> Any:
+    data = request.get_json(force=True) or {}
+    with STATE_LOCK:
+        if bool(data.get("reset")):
+            active_job_id = APP_STATE.get("active_job_id")
+            latest_job_id = APP_STATE.get("latest_job_id")
+            APP_STATE.clear()
+            APP_STATE.update(_default_app_state())
+            APP_STATE["active_job_id"] = active_job_id
+            APP_STATE["latest_job_id"] = latest_job_id
+        _merge_app_state_locked(data)
+        return jsonify(_app_state_payload_locked())
 
 
 @app.post("/api/datasets/<dataset_name>/index")
@@ -107,20 +152,44 @@ def api_range_count(dataset_name: str) -> Any:
 def api_available_times(dataset_name: str) -> Any:
     records = _ensure_indexed(dataset_name)
     date_text = request.args.get("date", "")
+    granularity = request.args.get("granularity", "second")
+    if granularity not in {"second", "minute"}:
+        abort(400, description="granularity must be 'second' or 'minute'")
     timestamped = records[records["timestamp"].notna()].copy()
     if date_text:
         timestamped = timestamped[timestamped["timestamp"].dt.strftime("%Y-%m-%d") == date_text]
     values = []
-    for timestamp in timestamped["timestamp"].sort_values():
-        dt = timestamp.to_pydatetime()
-        values.append(
-            {
-                "timestamp": dt.strftime("%Y-%m-%dT%H:%M:%S"),
-                "date": dt.strftime("%Y-%m-%d"),
-                "time": dt.strftime("%H:%M:%S"),
-            }
-        )
-    return jsonify({"date": date_text, "times": values})
+    if granularity == "minute":
+        timestamped["minute"] = timestamped["timestamp"].dt.floor("min")
+        for minute, group in timestamped.groupby("minute", sort=True):
+            minute_dt = minute.to_pydatetime()
+            first_dt = group["timestamp"].min().to_pydatetime()
+            last_dt = group["timestamp"].max().to_pydatetime()
+            values.append(
+                {
+                    "timestamp": minute_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "start_timestamp": first_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "end_timestamp": last_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "date": minute_dt.strftime("%Y-%m-%d"),
+                    "time": minute_dt.strftime("%H:%M"),
+                    "count": int(len(group)),
+                }
+            )
+    else:
+        for timestamp in timestamped["timestamp"].sort_values():
+            dt = timestamp.to_pydatetime()
+            value = dt.strftime("%Y-%m-%dT%H:%M:%S")
+            values.append(
+                {
+                    "timestamp": value,
+                    "start_timestamp": value,
+                    "end_timestamp": value,
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "time": dt.strftime("%H:%M:%S"),
+                    "count": 1,
+                }
+            )
+    return jsonify({"date": date_text, "granularity": granularity, "times": values})
 
 
 @app.get("/api/datasets/<dataset_name>/preview-info")
@@ -225,11 +294,17 @@ def api_start_run() -> Any:
     RUN_ROOTS.add(output_root.resolve())
     roi_config = data["roi_config"]
     job_id = uuid.uuid4().hex
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with STATE_LOCK:
+        active_job = _active_job_locked()
+        if active_job is not None:
+            return jsonify({"error": "An analysis run is already active.", "active_job": active_job}), 409
         JOBS[job_id] = {
             "job_id": job_id,
             "state": "running",
-            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": started_at,
+            "cancel_requested": False,
+            "logs": [f"{started_at} step: job queued"],
             "progress": {
                 "dataset_name": dataset_name,
                 "total_images": int(len(selected)),
@@ -242,11 +317,44 @@ def api_start_run() -> Any:
             "result": None,
             "error": None,
         }
+        APP_STATE.update(
+            {
+                "selected_dataset_name": dataset_name,
+                "time_mode": str(data.get("time_mode", "complete")),
+                "range_start": str(data.get("range_start", "")),
+                "range_end": str(data.get("range_end", "")),
+                "workflow": {"dataset": True, "roi": True, "algorithm": True},
+                "roi_corners": deepcopy(roi_config.get("corners")),
+                "grid_size": algorithm_config.grid_size,
+                "algorithm_config": algorithm_config.to_dict(),
+                "algorithm_preset_name": str(data.get("algorithm_preset_name", "")),
+                "roi_preset_name": str(data.get("roi_preset_name", "")),
+                "compute_backend": algorithm_config.compute_backend,
+                "active_job_id": job_id,
+                "latest_job_id": job_id,
+                "updated_at": started_at,
+            }
+        )
 
     def update_progress(progress: dict[str, Any]) -> None:
         with STATE_LOCK:
             if job_id in JOBS:
+                if JOBS[job_id].get("cancel_requested"):
+                    progress = dict(progress)
+                    progress["status_message"] = "cancel requested; stopping after current processing step"
                 JOBS[job_id]["progress"] = progress
+
+    def append_log(line: str) -> None:
+        with STATE_LOCK:
+            if job_id in JOBS:
+                logs = JOBS[job_id].setdefault("logs", [])
+                logs.append(line)
+                if len(logs) > 300:
+                    del logs[:-300]
+
+    def cancel_requested() -> bool:
+        with STATE_LOCK:
+            return bool(JOBS.get(job_id, {}).get("cancel_requested", False))
 
     def worker() -> None:
         try:
@@ -258,21 +366,38 @@ def api_start_run() -> Any:
                 range_start=start,
                 range_end=end,
                 progress_callback=update_progress,
+                cancel_check=cancel_requested,
+                log_callback=append_log,
                 selected_algorithm_preset=str(data.get("algorithm_preset_name", "")),
                 selected_roi_preset=str(data.get("roi_preset_name", "")),
             )
             with STATE_LOCK:
-                JOBS[job_id]["state"] = "finished"
+                JOBS[job_id]["state"] = "cancelled" if result.cancelled else "finished"
+                if result.cancelled:
+                    progress = dict(JOBS[job_id].get("progress") or {})
+                    progress["status_message"] = "cancelled"
+                    JOBS[job_id]["progress"] = progress
                 JOBS[job_id]["result"] = {
                     "run_id": result.run_folder.name,
                     "run_folder": str(result.run_folder),
                     "results_csv": str(result.results_csv),
                     "summary_plot": str(result.summary_plot),
                 }
+                if APP_STATE.get("active_job_id") == job_id:
+                    APP_STATE["active_job_id"] = None
+                    APP_STATE["latest_job_id"] = job_id
+                    APP_STATE["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         except Exception as exc:
             with STATE_LOCK:
                 JOBS[job_id]["state"] = "failed"
                 JOBS[job_id]["error"] = str(exc)
+                JOBS[job_id].setdefault("logs", []).append(
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} step: run failed: {exc}"
+                )
+                if APP_STATE.get("active_job_id") == job_id:
+                    APP_STATE["active_job_id"] = None
+                    APP_STATE["latest_job_id"] = job_id
+                    APP_STATE["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     thread = threading.Thread(target=worker, name=f"analysis-run-{job_id}", daemon=True)
     thread.start()
@@ -283,8 +408,26 @@ def api_start_run() -> Any:
 def api_run_status(job_id: str) -> Any:
     with STATE_LOCK:
         job = JOBS.get(job_id)
+    if job is None:
+        abort(404)
+    return jsonify(job)
+
+
+@app.post("/api/runs/<job_id>/cancel")
+def api_cancel_run(job_id: str) -> Any:
+    with STATE_LOCK:
+        job = JOBS.get(job_id)
         if job is None:
             abort(404)
+        if job["state"] in {"running", "cancelling"}:
+            job["cancel_requested"] = True
+            job["state"] = "cancelling"
+            job.setdefault("logs", []).append(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} step: cancel requested by user"
+            )
+            progress = dict(job.get("progress") or {})
+            progress["status_message"] = "cancel requested; stopping after current processing step"
+            job["progress"] = progress
         return jsonify(job)
 
 
@@ -421,6 +564,58 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | list[Any] | None:
         return None
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _active_job_locked() -> dict[str, Any] | None:
+    active_id = APP_STATE.get("active_job_id")
+    if active_id:
+        job = JOBS.get(str(active_id))
+        if job and job.get("state") in RUNNING_JOB_STATES:
+            return deepcopy(job)
+    for job_id, job in reversed(JOBS.items()):
+        if job.get("state") in RUNNING_JOB_STATES:
+            APP_STATE["active_job_id"] = job_id
+            return deepcopy(job)
+    APP_STATE["active_job_id"] = None
+    return None
+
+
+def _latest_job_locked() -> dict[str, Any] | None:
+    latest_id = APP_STATE.get("latest_job_id")
+    if latest_id and str(latest_id) in JOBS:
+        return deepcopy(JOBS[str(latest_id)])
+    if JOBS:
+        return deepcopy(next(reversed(JOBS.values())))
+    return None
+
+
+def _app_state_payload_locked() -> dict[str, Any]:
+    active_job = _active_job_locked()
+    return {
+        "ui_state": deepcopy(APP_STATE),
+        "active_job": active_job,
+        "latest_job": active_job or _latest_job_locked(),
+    }
+
+
+def _merge_app_state_locked(data: dict[str, Any]) -> None:
+    allowed = {
+        "selected_dataset_name",
+        "time_mode",
+        "range_start",
+        "range_end",
+        "workflow",
+        "roi_corners",
+        "grid_size",
+        "roi_preset_name",
+        "algorithm_config",
+        "algorithm_preset_name",
+        "compute_backend",
+    }
+    for key in allowed:
+        if key in data:
+            APP_STATE[key] = deepcopy(data[key])
+    APP_STATE["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _availability_summary(records: pd.DataFrame) -> dict[str, Any]:

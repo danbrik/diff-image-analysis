@@ -9,6 +9,12 @@ const state = {
   previewImage: null,
   roiCorners: null,
   dragCorner: null,
+  activeJobId: null,
+  pollTimer: null,
+  runProgressSamples: [],
+  sharedStateReady: false,
+  applyingSharedState: false,
+  sharedStateSaveTimer: null,
   currentRunId: null,
   currentMetrics: [],
   defaultMetrics: [],
@@ -127,6 +133,114 @@ function renderDetails(id, pairs) {
   }
 }
 
+function collectSharedState() {
+  let algorithmConfig = {};
+  try {
+    algorithmConfig = getAlgorithmConfig();
+  } catch (_error) {
+    algorithmConfig = state.algorithmDefaults || {};
+  }
+  return {
+    selected_dataset_name: state.selectedDataset?.name || null,
+    time_mode: document.querySelector("input[name='time-mode']:checked")?.value || "complete",
+    range_start: $("range-start").value || "",
+    range_end: $("range-end").value || "",
+    workflow: { ...state.workflow },
+    roi_corners: state.roiCorners ? JSON.parse(JSON.stringify(state.roiCorners)) : null,
+    grid_size: getGridSize(),
+    roi_preset_name: $("roi-preset-select")?.value || "",
+    algorithm_config: algorithmConfig,
+    algorithm_preset_name: $("algorithm-preset-select")?.value || "",
+    compute_backend: $("compute-backend")?.value || algorithmConfig.compute_backend || "gpu",
+  };
+}
+
+function scheduleSharedStateSave(extraPatch = null) {
+  if (!state.sharedStateReady || state.applyingSharedState) return;
+  clearTimeout(state.sharedStateSaveTimer);
+  state.sharedStateSaveTimer = setTimeout(() => {
+    void saveSharedState(extraPatch);
+  }, 250);
+}
+
+async function saveSharedState(extraPatch = null) {
+  if (state.applyingSharedState) return;
+  const payload = extraPatch ? { ...collectSharedState(), ...extraPatch } : collectSharedState();
+  try {
+    await fetchJson("/api/app-state", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.warn("Shared state save failed", error);
+  }
+}
+
+async function loadSharedState() {
+  try {
+    const payload = await fetchJson("/api/app-state");
+    await applySharedState(payload);
+  } catch (error) {
+    setStatus("range-summary", `Could not load shared app state: ${error.message}`, "warning");
+    state.sharedStateReady = true;
+  }
+}
+
+async function applySharedState(payload) {
+  const ui = payload.ui_state || {};
+  state.applyingSharedState = true;
+  try {
+    if (ui.selected_dataset_name && state.datasets.some((dataset) => dataset.name === ui.selected_dataset_name)) {
+      $("dataset-select").value = ui.selected_dataset_name;
+      setSelectedDataset(ui.selected_dataset_name, { resetDependent: false });
+    }
+
+    const mode = ui.time_mode === "custom" ? "custom" : "complete";
+    const radio = document.querySelector(`input[name='time-mode'][value='${mode}']`);
+    if (radio) radio.checked = true;
+    if (ui.range_start) setRangeValue("start", ui.range_start);
+    if (ui.range_end) setRangeValue("end", ui.range_end);
+
+    if (ui.algorithm_config) {
+      renderAlgorithmForm({ ...state.algorithmDefaults, ...ui.algorithm_config });
+      $("compute-backend").value = ui.compute_backend || ui.algorithm_config.compute_backend || "gpu";
+    }
+    if (ui.grid_size) $("grid-size").value = ui.grid_size;
+    if (ui.roi_corners) state.roiCorners = JSON.parse(JSON.stringify(ui.roi_corners));
+    if (ui.algorithm_preset_name && $("algorithm-preset-select")) {
+      $("algorithm-preset-select").value = ui.algorithm_preset_name;
+    }
+
+    if (ui.workflow) {
+      state.workflow = {
+        dataset: Boolean(ui.workflow.dataset),
+        roi: Boolean(ui.workflow.roi),
+        algorithm: Boolean(ui.workflow.algorithm),
+      };
+    }
+
+    syncRangeVisibility();
+    await updateRangeCount();
+    await loadRoiPresets();
+    if (ui.roi_preset_name && $("roi-preset-select")) {
+      $("roi-preset-select").value = ui.roi_preset_name;
+    }
+    if (state.workflow.dataset && state.selectedDataset?.indexed && state.roiCorners && !payload.active_job) {
+      await loadPreview({ preserveWorkflow: true });
+    }
+    updateWorkflowStatus();
+  } finally {
+    state.applyingSharedState = false;
+    state.sharedStateReady = true;
+  }
+
+  if (payload.active_job && ["running", "cancelling"].includes(payload.active_job.state)) {
+    attachRunJob(payload.active_job);
+  } else if (payload.latest_job) {
+    renderProgress(payload.latest_job);
+  }
+}
+
 function setWorkflowStatus(section, complete) {
   state.workflow[section] = Boolean(complete);
   updateWorkflowStatus();
@@ -159,8 +273,11 @@ function updateWorkflowStatus() {
     button.classList.toggle("step-complete", complete);
     button.setAttribute("aria-label", `${button.textContent.trim()} ${complete ? "complete" : "incomplete"}`);
   }
+  $("index-dataset").disabled = !state.selectedDataset;
+  $("confirm-dataset").disabled = !(state.selectedDataset?.indexed && state.rangeCount > 0);
   $("load-preview").disabled = !state.workflow.dataset;
   refreshRunButton();
+  scheduleSharedStateSave();
 }
 
 function resetPreviewAndRoi() {
@@ -309,13 +426,24 @@ function populateDateSelect(select, dates, selectedDate, isSelectable) {
   select.value = selectedDate;
 }
 
-function populateTimeSelect(select, times, selectedTimestamp, isSelectable) {
+function timeValueForSelection(item, which) {
+  if (which === "end") return item.end_timestamp || item.timestamp;
+  return item.start_timestamp || item.timestamp;
+}
+
+function timeOptionLabel(item) {
+  if (item.count && item.count > 1) return `${item.time} (${item.count})`;
+  return item.time;
+}
+
+function populateTimeSelect(select, times, selectedTimestamp, isSelectable, which = "start") {
   select.replaceChildren();
   for (const item of times) {
+    const timestamp = timeValueForSelection(item, which);
     const option = document.createElement("option");
-    option.value = item.timestamp;
-    option.textContent = item.time;
-    option.disabled = isSelectable ? !isSelectable(item.timestamp) : false;
+    option.value = timestamp;
+    option.textContent = timeOptionLabel(item);
+    option.disabled = isSelectable ? !isSelectable(timestamp) : false;
     select.append(option);
   }
   select.value = selectedTimestamp;
@@ -328,21 +456,26 @@ function pickDate(dates, preferredDate, isSelectable, preferLast = false) {
   return validDates[preferLast ? validDates.length - 1 : 0];
 }
 
-function pickTimestamp(times, preferredTimestamp, isSelectable, preferLast = false) {
-  const validTimes = times.filter((item) => (isSelectable ? isSelectable(item.timestamp) : true));
+function pickTimestamp(times, preferredTimestamp, isSelectable, preferLast = false, which = "start") {
+  const validTimes = times.filter((item) => {
+    const timestamp = timeValueForSelection(item, which);
+    return isSelectable ? isSelectable(timestamp) : true;
+  });
   if (!validTimes.length) return null;
-  const exact = validTimes.find((item) => item.timestamp === preferredTimestamp);
-  return exact || validTimes[preferLast ? validTimes.length - 1 : 0];
+  const exact = validTimes.find((item) => timeValueForSelection(item, which) === preferredTimestamp);
+  const selected = exact || validTimes[preferLast ? validTimes.length - 1 : 0];
+  return { ...selected, selected_timestamp: timeValueForSelection(selected, which) };
 }
 
 async function loadTimesForDate(dateText) {
   if (!state.selectedDataset || !dateText) return [];
-  if (state.availableTimesByDate[dateText]) return state.availableTimesByDate[dateText];
+  const cacheKey = `${dateText}|minute`;
+  if (state.availableTimesByDate[cacheKey]) return state.availableTimesByDate[cacheKey];
   const data = await fetchJson(
-    `/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/available-times?date=${encodeURIComponent(dateText)}`
+    `/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/available-times?date=${encodeURIComponent(dateText)}&granularity=minute`
   );
-  state.availableTimesByDate[dateText] = data.times || [];
-  return state.availableTimesByDate[dateText];
+  state.availableTimesByDate[cacheKey] = data.times || [];
+  return state.availableTimesByDate[cacheKey];
 }
 
 let timestampPickerRenderId = 0;
@@ -360,7 +493,7 @@ async function renderTimestampPicker() {
     for (const select of dateSelects) setSelectPlaceholder(select, "No indexed dates");
     for (const select of timeSelects) setSelectPlaceholder(select, "No indexed times");
     for (const select of [...dateSelects, ...timeSelects]) select.disabled = true;
-    if (help) help.textContent = "Confirm the dataset first. Custom range choices are built from parsed image timestamps.";
+    if (help) help.textContent = "Index the dataset first. Custom range choices are built from parsed image timestamps.";
     return;
   }
 
@@ -377,11 +510,13 @@ async function renderTimestampPicker() {
   let startChoice = pickTimestamp(
     startTimes,
     startValue,
-    (timestamp) => startDate !== endDate || !endValue || timestamp <= endValue
+    (timestamp) => startDate !== endDate || !endValue || timestamp <= endValue,
+    false,
+    "start"
   );
-  if (!startChoice) startChoice = pickTimestamp(startTimes, startValue, null);
+  if (!startChoice) startChoice = pickTimestamp(startTimes, startValue, null, false, "start");
   if (startChoice) {
-    startValue = startChoice.timestamp;
+    startValue = startChoice.selected_timestamp;
     setRangeValue("start", startValue);
   }
 
@@ -389,11 +524,12 @@ async function renderTimestampPicker() {
     endTimes,
     endValue,
     (timestamp) => endDate !== startDate || !startValue || timestamp >= startValue,
-    true
+    true,
+    "end"
   );
-  if (!endChoice) endChoice = pickTimestamp(endTimes, endValue, null, true);
+  if (!endChoice) endChoice = pickTimestamp(endTimes, endValue, null, true, "end");
   if (endChoice) {
-    endValue = endChoice.timestamp;
+    endValue = endChoice.selected_timestamp;
     setRangeValue("end", endValue);
   }
 
@@ -406,19 +542,21 @@ async function renderTimestampPicker() {
     $("range-start-time"),
     startTimes,
     $("range-start").value,
-    (timestamp) => startDate !== endDate || timestamp <= $("range-end").value
+    (timestamp) => startDate !== endDate || timestamp <= $("range-end").value,
+    "start"
   );
   populateTimeSelect(
     $("range-end-time"),
     endTimes,
     $("range-end").value,
-    (timestamp) => startDate !== endDate || timestamp >= $("range-start").value
+    (timestamp) => startDate !== endDate || timestamp >= $("range-start").value,
+    "end"
   );
   for (const select of [...dateSelects, ...timeSelects]) select.disabled = controlsHidden;
   if (help) {
     const first = state.availability.first_timestamp || "";
     const last = state.availability.last_timestamp || "";
-    help.textContent = `Only dates and times with parsed images are selectable. Indexed timestamp range: ${first} to ${last}.`;
+    help.textContent = `Only dates and minute groups with parsed images are selectable. End-minute selections include all images through that minute. Indexed timestamp range: ${first} to ${last}.`;
   }
 }
 
@@ -436,9 +574,10 @@ async function onTimestampDateChange(which) {
       if (!other || datePart(other) !== dateText) return true;
       return which === "start" ? timestamp <= other : timestamp >= other;
     },
-    which === "end"
+    which === "end",
+    which
   );
-  if (choice) setRangeValue(which, choice.timestamp);
+  if (choice) setRangeValue(which, choice.selected_timestamp);
   enforceRangeOrder();
   await renderTimestampPicker();
   markDatasetSelectionDirty();
@@ -455,6 +594,11 @@ async function onTimestampTimeChange(which) {
 }
 
 function resetWorkflow() {
+  if (state.activeJobId) {
+    switchRunStep("execute-step");
+    setStatus("gpu-status", "A run is active. Cancel or wait for it to finish before resetting the workflow.", "warning");
+    return;
+  }
   state.workflow.dataset = false;
   state.workflow.roi = false;
   state.workflow.algorithm = false;
@@ -483,6 +627,10 @@ function resetWorkflow() {
   setStatus("plot-status", "");
   $("progress-fill").style.width = "0%";
   renderDetails("progress-details", []);
+  renderRunLog([]);
+  state.activeJobId = null;
+  state.runProgressSamples = [];
+  $("cancel-run").disabled = true;
 
   switchTab("run-tab");
   switchRunStep("dataset-step");
@@ -569,23 +717,42 @@ function renderDatasetDetails() {
 
 async function indexSelectedDataset() {
   if (!state.selectedDataset) return;
-  setStatus("range-summary", "Confirming dataset and indexing images...");
+  setStatus("range-summary", "Indexing dataset images...");
   const data = await fetchJson(`/api/datasets/${encodeURIComponent(state.selectedDataset.name)}/index`, {
     method: "POST",
   });
   storeAvailability(data.availability, false);
-  await renderTimestampPicker();
   Object.assign(state.selectedDataset, data.summary, { indexed: true });
   renderDatasetDetails();
-  await updateRangeCount();
-  state.workflow.dataset = state.rangeCount > 0;
+  state.workflow.dataset = false;
   state.workflow.roi = false;
   state.workflow.algorithm = false;
   resetPreviewAndRoi();
   updateWorkflowStatus();
+  await renderTimestampPicker();
+  await updateRangeCount();
+}
+
+async function confirmSelectedDataset() {
+  if (!state.selectedDataset) return;
+  if (!state.selectedDataset.indexed) {
+    setStatus("range-summary", "Index the selected dataset before confirming the dataset and time range.", "warning");
+    return;
+  }
+  await updateRangeCount();
   if (state.rangeCount > 0) {
+    state.workflow.dataset = true;
+    state.workflow.roi = false;
+    state.workflow.algorithm = false;
+    resetPreviewAndRoi();
+    updateWorkflowStatus();
+    setStatus("range-summary", `Dataset and time range confirmed. Images in selected range: ${state.rangeCount}.`, "success");
     switchRunStep("roi-step");
     await loadPreview();
+  } else {
+    setStatus("range-summary", "The selected time range contains no images. Adjust the range before confirming.", "warning");
+    state.workflow.dataset = false;
+    updateWorkflowStatus();
   }
 }
 
@@ -607,7 +774,8 @@ async function updateRangeCount() {
     state.rangeCount = 0;
     resetAvailability();
     void renderTimestampPicker();
-    setStatus("range-summary", "Confirm the selected dataset to count images in the processing range.");
+    setStatus("range-summary", "Index the selected dataset to count images in the processing range.");
+    updateWorkflowStatus();
     refreshRunButton();
     return;
   }
@@ -625,10 +793,11 @@ async function updateRangeCount() {
     state.rangeCount = 0;
     setStatus("range-summary", error.message, "error");
   }
+  updateWorkflowStatus();
   refreshRunButton();
 }
 
-async function loadPreview() {
+async function loadPreview(options = {}) {
   if (!state.selectedDataset) return;
   if (!state.selectedDataset.indexed) {
     setStatus("roi-status", "Confirm the selected dataset before loading the first image preview.", "warning");
@@ -647,7 +816,11 @@ async function loadPreview() {
     if (!state.roiCorners) {
       state.roiCorners = defaultCorners(data.original_shape);
     }
-    markRoiDirty();
+    if (options.preserveWorkflow) {
+      updateWorkflowStatus();
+    } else {
+      markRoiDirty();
+    }
     drawRoiCanvas();
     setStatus(
       "roi-status",
@@ -1027,8 +1200,10 @@ function confirmAlgorithm() {
 }
 
 function refreshRunButton() {
+  const runActive = Boolean(state.activeJobId);
   $("start-run").disabled = !(
-    state.workflow.dataset
+    !runActive
+    && state.workflow.dataset
     && state.workflow.roi
     && state.workflow.algorithm
     && state.selectedDataset
@@ -1036,6 +1211,7 @@ function refreshRunButton() {
     && state.roiCorners
     && state.preview
   );
+  $("cancel-run").disabled = !runActive;
 }
 
 async function checkGpuStatus() {
@@ -1081,13 +1257,20 @@ async function startRun() {
     },
   };
   $("start-run").disabled = true;
+  $("cancel-run").disabled = true;
+  state.activeJobId = null;
+  state.runProgressSamples = [];
+  renderRunLog(["Starting run..."]);
   try {
     const data = await fetchJson("/api/runs", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    pollRun(data.job_id);
+    state.activeJobId = data.job_id;
+    $("cancel-run").disabled = false;
+    scheduleRunPoll(data.job_id, 0);
   } catch (error) {
+    state.activeJobId = null;
     setStatus("gpu-status", error.message, "error");
     $("progress-fill").style.width = "0%";
     renderDetails("progress-details", [
@@ -1095,29 +1278,82 @@ async function startRun() {
       ["Compute backend", algorithmConfig.compute_backend],
       ["Status", error.message],
     ]);
+    renderRunLog([`Run failed before starting: ${error.message}`]);
+    await loadSharedState();
     refreshRunButton();
   }
 }
 
+function attachRunJob(job) {
+  state.activeJobId = job.job_id;
+  state.runProgressSamples = [];
+  switchTab("run-tab");
+  switchRunStep("execute-step");
+  renderProgress(job);
+  refreshRunButton();
+  if (job.state === "running" || job.state === "cancelling") {
+    scheduleRunPoll(job.job_id, 1000);
+  }
+}
+
+function scheduleRunPoll(jobId, delayMs = 1000) {
+  clearTimeout(state.pollTimer);
+  state.pollTimer = setTimeout(() => {
+    void pollRun(jobId);
+  }, delayMs);
+}
+
 async function pollRun(jobId) {
-  const data = await fetchJson(`/api/runs/${jobId}/status`);
+  let data;
+  try {
+    data = await fetchJson(`/api/runs/${jobId}/status`);
+  } catch (error) {
+    setStatus("gpu-status", `Run status connection interrupted; retrying. ${error.message}`, "warning");
+    if (state.activeJobId === jobId) {
+      scheduleRunPoll(jobId, 2000);
+    }
+    return;
+  }
   renderProgress(data);
-  if (data.state === "running") {
-    setTimeout(() => pollRun(jobId), 1000);
+  if (data.state === "running" || data.state === "cancelling") {
+    scheduleRunPoll(jobId, 1000);
   } else {
+    clearTimeout(state.pollTimer);
+    if (state.activeJobId === jobId) {
+      state.activeJobId = null;
+      $("cancel-run").disabled = true;
+    }
     refreshRunButton();
     if (data.state === "finished" && data.result?.run_id) {
       await loadRuns();
       switchTab("results-tab");
       $("run-select").value = data.result.run_id;
       await loadRunDetails();
+    } else if (data.state === "cancelled" && data.result?.run_id) {
+      await loadRuns();
     }
+  }
+}
+
+async function cancelRun() {
+  if (!state.activeJobId) return;
+  const jobId = state.activeJobId;
+  $("cancel-run").disabled = true;
+  try {
+    const data = await fetchJson(`/api/runs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    renderProgress(data);
+  } catch (error) {
+    setStatus("gpu-status", error.message, "error");
+    $("cancel-run").disabled = false;
   }
 }
 
 function renderProgress(job) {
   const progress = job.progress || {};
   const pct = Math.max(0, Math.min(100, Number(progress.percentage || 0)));
+  const eta = estimateRemaining(job, pct);
   $("progress-fill").style.width = `${pct}%`;
   renderDetails("progress-details", [
     ["State", job.state],
@@ -1129,9 +1365,65 @@ function renderProgress(job) {
     ["Current image index", progress.current_image_index ?? ""],
     ["Current timestamp", progress.current_timestamp ?? ""],
     ["Progress", `${pct.toFixed(1)}%`],
+    ["Estimated remaining", eta],
     ["Status", job.error || progress.status_message || ""],
     ["Run folder", job.result?.run_folder || ""],
   ]);
+  renderRunLog(job.logs || []);
+}
+
+function renderRunLog(logs) {
+  const pre = $("run-log");
+  const count = $("run-log-count");
+  const lines = logs || [];
+  pre.textContent = lines.length ? lines.join("\n") : "No run log entries yet.";
+  pre.scrollTop = pre.scrollHeight;
+  count.textContent = `${lines.length} ${lines.length === 1 ? "entry" : "entries"}`;
+}
+
+function estimateRemaining(job, pct) {
+  if (job.state === "cancelling") return "cancelling...";
+  if (job.state !== "running") return "";
+  if (!Number.isFinite(pct) || pct <= 0) return "calculating...";
+  if (pct >= 100) return "done";
+
+  const now = Date.now();
+  const samples = state.runProgressSamples;
+  const last = samples[samples.length - 1];
+  if (!last || last.pct !== pct) {
+    samples.push({ pct, time: now });
+  }
+  while (samples.length > 200) samples.shift();
+
+  const threshold = Math.max(0, pct - 2);
+  let baseline = null;
+  for (let idx = samples.length - 1; idx >= 0; idx -= 1) {
+    if (samples[idx].pct <= threshold) {
+      baseline = samples[idx];
+      break;
+    }
+  }
+  if (!baseline) {
+    baseline = samples.find((sample) => sample.pct < pct) || null;
+  }
+  if (!baseline) return "calculating...";
+
+  const deltaPct = pct - baseline.pct;
+  const deltaSeconds = (now - baseline.time) / 1000;
+  if (deltaPct <= 0 || deltaSeconds <= 0) return "calculating...";
+  const secondsRemaining = (deltaSeconds / deltaPct) * (100 - pct);
+  if (!Number.isFinite(secondsRemaining) || secondsRemaining < 0) return "calculating...";
+  return `~${formatDuration(secondsRemaining)}`;
+}
+
+function formatDuration(seconds) {
+  const rounded = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
 }
 
 async function loadRuns() {
@@ -1427,6 +1719,7 @@ function bindEvents() {
     switchRunStep("dataset-step");
   });
   $("index-dataset").addEventListener("click", indexSelectedDataset);
+  $("confirm-dataset").addEventListener("click", confirmSelectedDataset);
   document.querySelectorAll("input[name='time-mode']").forEach((input) => {
     input.addEventListener("change", () => {
       markDatasetSelectionDirty();
@@ -1463,9 +1756,11 @@ function bindEvents() {
         : "CPU selected. The run will not require PyTorch/CUDA.",
       backend === "gpu" ? "warning" : ""
     );
+    markAlgorithmDirty();
   });
   $("check-gpu").addEventListener("click", checkGpuStatus);
   $("start-run").addEventListener("click", startRun);
+  $("cancel-run").addEventListener("click", cancelRun);
   $("refresh-runs").addEventListener("click", loadRuns);
   $("load-run").addEventListener("click", loadRunDetails);
   $("metric-search").addEventListener("input", renderMetricList);
@@ -1487,6 +1782,7 @@ async function init() {
   await loadDatasets();
   await loadAlgorithmPresets();
   await loadRuns();
+  await loadSharedState();
   drawRoiCanvas();
 }
 

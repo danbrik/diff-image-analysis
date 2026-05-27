@@ -27,6 +27,7 @@ dist/
 pip-wheel-metadata/
 
 # Application outputs and local run artifacts
+configs/
 outputs/
 !outputs/.gitkeep
 *.log

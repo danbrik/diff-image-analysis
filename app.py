@@ -462,12 +462,15 @@ def api_result_run_details(run_id: str) -> Any:
         for col in results.columns
         if col not in {"timestamp", "image_path", "dataset_name", "processed_index", "status"}
     ]
+    default_metrics = [m for m in DEFAULT_PLOT_METRICS if m in metric_columns]
+    if not default_metrics:
+        default_metrics = metric_columns[:6]
     return jsonify(
         {
             "run_id": run_id,
             "row_count": int(len(results)),
             "metric_columns": metric_columns,
-            "default_metrics": [m for m in DEFAULT_PLOT_METRICS if m in metric_columns],
+            "default_metrics": default_metrics,
             "run_config": _read_json_if_exists(run_folder / "run_config.json"),
             "dataset_config_used": _read_json_if_exists(run_folder / "dataset_config_used.json"),
             "roi_config": _read_json_if_exists(run_folder / "roi_config.json"),
@@ -502,13 +505,18 @@ def api_result_data(run_id: str) -> Any:
     if not metrics:
         metrics = [metric for metric in DEFAULT_PLOT_METRICS if metric in results.columns]
     timestamps = pd.to_datetime(results.get("timestamp"), errors="coerce")
+    numeric_values = results[metrics].apply(pd.to_numeric, errors="coerce") if metrics else pd.DataFrame(index=results.index)
+    valid_mask = timestamps.notna()
+    if not numeric_values.empty:
+        valid_mask &= numeric_values.notna().any(axis=1)
     payload_rows = []
-    for idx, timestamp in enumerate(timestamps):
+    for idx in results.index[valid_mask]:
+        timestamp = timestamps.at[idx]
         row: dict[str, Any] = {
             "timestamp": timestamp.isoformat() if pd.notna(timestamp) else None,
         }
         for metric in metrics:
-            value = pd.to_numeric(pd.Series([results.at[idx, metric]]), errors="coerce").iloc[0]
+            value = numeric_values.at[idx, metric]
             row[metric] = None if pd.isna(value) else float(value)
         payload_rows.append(row)
     return jsonify({"run_id": run_id, "metrics": metrics, "rows": payload_rows})

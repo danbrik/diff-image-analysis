@@ -69,6 +69,7 @@ class DatasetConfig:
 class AlgorithmConfig:
     """Parameters controlling reference-image difference processing."""
 
+    algorithm_type: str = "difference"
     reference_window_size_images: int = 10
     reference_gap_images: int = 1
     live_average_size_images: int = 1
@@ -93,6 +94,8 @@ class AlgorithmConfig:
         defaults = cls()
         merged = {**asdict(defaults), **data}
         cfg = cls(
+            algorithm_type=str(merged.get("algorithm_type", "difference")).strip().lower()
+            or "difference",
             reference_window_size_images=int(merged["reference_window_size_images"]),
             reference_gap_images=int(merged["reference_gap_images"]),
             live_average_size_images=int(merged["live_average_size_images"]),
@@ -115,13 +118,16 @@ class AlgorithmConfig:
 
     def validate(self) -> None:
         """Raise ValueError when the processing configuration is invalid."""
+        if self.algorithm_type not in {"difference", "tile_statistics"}:
+            raise ValueError("algorithm_type must be 'difference' or 'tile_statistics'")
         positive_ints = {
-            "reference_window_size_images": self.reference_window_size_images,
             "live_average_size_images": self.live_average_size_images,
             "processing_stride_images": self.processing_stride_images,
             "smoothing_window_images": self.smoothing_window_images,
             "grid_size": self.grid_size,
         }
+        if self.algorithm_type == "difference":
+            positive_ints["reference_window_size_images"] = self.reference_window_size_images
         for name, value in positive_ints.items():
             if value < 1:
                 raise ValueError(f"{name} must be >= 1")

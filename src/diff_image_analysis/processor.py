@@ -139,7 +139,21 @@ def run_difference_analysis(
     selected_algorithm_preset: str = "",
     selected_roi_preset: str = "",
 ) -> RunResult:
-    """Run the reference-image difference algorithm and persist run artifacts."""
+    """Run the selected algorithm and persist run artifacts."""
+    if algorithm_config.algorithm_type == "tile_statistics":
+        return _run_tile_statistics_analysis(
+            all_records=all_records,
+            dataset=dataset,
+            roi_config=roi_config,
+            algorithm_config=algorithm_config,
+            range_start=range_start,
+            range_end=range_end,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            log_callback=log_callback,
+            selected_algorithm_preset=selected_algorithm_preset,
+            selected_roi_preset=selected_roi_preset,
+        )
     algorithm_config.validate()
     compute_context = get_compute_context(algorithm_config.compute_backend)
     output_root = Path(algorithm_config.output_directory)
@@ -446,6 +460,251 @@ def run_difference_analysis(
     )
 
 
+def _run_tile_statistics_analysis(
+    all_records: pd.DataFrame,
+    dataset: DatasetConfig,
+    roi_config: dict[str, Any],
+    algorithm_config: AlgorithmConfig,
+    range_start: datetime | None = None,
+    range_end: datetime | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+    log_callback: LogCallback | None = None,
+    selected_algorithm_preset: str = "",
+    selected_roi_preset: str = "",
+) -> RunResult:
+    """Compute per-tile mean and median intensity summaries over the selected time range."""
+    algorithm_config.validate()
+    compute_context = get_compute_context(algorithm_config.compute_backend)
+    output_root = Path(algorithm_config.output_directory)
+    run_folder = _make_run_folder(output_root, algorithm_config.run_name)
+    run_folder.mkdir(parents=True, exist_ok=True)
+
+    logs: list[str] = []
+    start_time = datetime.now()
+    logs.append(f"run_start: {format_datetime(start_time)}")
+    logs.append(f"dataset: {dataset.name}")
+    logs.append(f"algorithm_type: {algorithm_config.algorithm_type}")
+    logs.append(f"algorithm_preset: {selected_algorithm_preset or '(unspecified)'}")
+    logs.append(f"roi_preset: {selected_roi_preset or '(unspecified)'}")
+    logs.append(f"range_start: {format_datetime(range_start)}")
+    logs.append(f"range_end: {format_datetime(range_end)}")
+    logs.append(f"compute_backend: {compute_context.backend}")
+    logs.append(f"compute_device: {compute_context.device_name or compute_context.device}")
+    logs.append(f"image_cache_size_images: {algorithm_config.image_cache_size_images}")
+    _log_step(logs, log_callback, f"run folder prepared: {run_folder}")
+    _log_step(
+        logs,
+        log_callback,
+        f"compute backend initialized: {compute_context.backend} ({compute_context.device_name or compute_context.device})",
+    )
+
+    missing_timestamps = int(all_records["timestamp"].isna().sum()) if not all_records.empty else 0
+    if missing_timestamps:
+        _log_step(logs, log_callback, f"missing timestamps in indexed dataset: {missing_timestamps}")
+
+    timestamped_all = all_records[all_records["timestamp"].notna()].reset_index(drop=True).copy()
+    selected = filter_records_by_time(timestamped_all, range_start, range_end).reset_index(drop=True)
+    total_selected = int(len(selected))
+    _log_step(
+        logs,
+        log_callback,
+        f"selected {total_selected} timestamped images from {len(timestamped_all)} available timestamped records",
+    )
+
+    _write_json(run_folder / "run_config.json", algorithm_config.to_dict())
+    _write_json(run_folder / "dataset_config_used.json", dataset_config_json(dataset))
+    _write_json(run_folder / "roi_config.json", roi_config)
+    _log_step(logs, log_callback, "run, dataset, and ROI configuration files written")
+
+    if total_selected == 0:
+        _log_step(logs, log_callback, "selected range contains no images; writing empty result files")
+        results = pd.DataFrame(columns=_base_columns())
+        results_csv = run_folder / "results.csv"
+        results.to_csv(results_csv, index=False)
+        summary_plot = run_folder / "summary_plot.png"
+        save_metrics_plot(results, [], summary_plot, title="ROI tile summary metrics")
+        _finish_log(run_folder, logs, start_time)
+        return RunResult(run_folder=run_folder, results_csv=results_csv, summary_plot=summary_plot)
+
+    corners_original = corners_dict_to_array(roi_config["corners"])
+    cell_regions_cache: dict[tuple[int, int], ComputeMetricRegions] = {}
+    image_cache = ImageCache(
+        max_size=algorithm_config.image_cache_size_images,
+        downscale_factor=algorithm_config.image_downscale_factor,
+        compute_context=compute_context,
+    )
+    _log_step(
+        logs,
+        log_callback,
+        f"image cache initialized: max_size={image_cache.max_size}, downscale={algorithm_config.image_downscale_factor}",
+    )
+
+    rows: list[dict[str, Any]] = []
+    skipped_stride = 0
+    insufficient_live_window = 0
+    cancelled = False
+    next_progress_log = 5
+
+    try:
+        _log_step(logs, log_callback, "tile statistics loop started")
+        for selected_order, selected_row in selected.iterrows():
+            _raise_if_cancelled(cancel_check)
+            source_index = int(selected_row["source_index"])
+            timestamp = selected_row["timestamp"].to_pydatetime()
+            image_path = str(selected_row["image_path"])
+
+            base_row = {
+                "timestamp": format_datetime(timestamp),
+                "image_path": image_path,
+                "dataset_name": dataset.name,
+                "processed_index": source_index,
+            }
+
+            progress_payload = {
+                "dataset_name": dataset.name,
+                "total_images": total_selected,
+                "processed_images": int(selected_order),
+                "current_image_index": source_index,
+                "current_timestamp": format_datetime(timestamp),
+                "percentage": float(selected_order / total_selected * 100.0),
+                "status_message": f"processing tile statistics on {compute_context.backend}",
+                "compute_backend": compute_context.backend,
+                "compute_device": compute_context.device_name or compute_context.device,
+            }
+            _emit(progress_callback, progress_payload)
+            while progress_payload["percentage"] >= next_progress_log and next_progress_log < 100:
+                _log_step(
+                    logs,
+                    log_callback,
+                    f"progress {next_progress_log}%: selected position {selected_order}/{total_selected}, source index {source_index}",
+                )
+                next_progress_log += 5
+
+            if selected_order % algorithm_config.processing_stride_images != 0:
+                rows.append({**base_row, "status": "skipped_stride"})
+                skipped_stride += 1
+                continue
+
+            live_start = selected_order - algorithm_config.live_average_size_images + 1
+            if live_start < 0:
+                rows.append({**base_row, "status": "insufficient_live_window"})
+                insufficient_live_window += 1
+                continue
+
+            live_paths = selected.iloc[live_start : selected_order + 1]["image_path"].tolist()
+            try:
+                live_images = image_cache.load_many(live_paths, cancel_check=cancel_check)
+                _raise_if_cancelled(cancel_check)
+                live_image = _build_live_image(live_images, compute_context)
+            except RunCancelled:
+                raise
+            except Exception as exc:
+                rows.append({**base_row, "status": "unreadable_live_window"})
+                logs.append(f"unreadable_live_window: selected_index={selected_order} source_index={source_index} error={exc}")
+                continue
+
+            image_shape = (int(live_image.shape[0]), int(live_image.shape[1]))
+            if image_shape not in cell_regions_cache:
+                scaled_corners = scale_corners(corners_original, algorithm_config.image_downscale_factor)
+                masks = build_grid_masks(
+                    image_shape=image_shape,
+                    corners=scaled_corners,
+                    grid_size=algorithm_config.grid_size,
+                )
+                cell_regions_cache[image_shape] = _prepare_metric_regions(
+                    masks.full_mask,
+                    masks.cell_masks,
+                    compute_context,
+                )
+                _log_step(
+                    logs,
+                    log_callback,
+                    f"ROI/grid masks prepared: shape={image_shape}, grid={algorithm_config.grid_size}x{algorithm_config.grid_size}",
+                )
+
+            cell_regions = cell_regions_cache[image_shape]
+            cell_stats = _compute_cell_timepoint_statistics(live_image, cell_regions, compute_context)
+            if not cell_stats:
+                rows.append({**base_row, "status": "empty_roi"})
+                logs.append(f"empty_roi: selected_index={selected_order} source_index={source_index} shape={image_shape}")
+                continue
+
+            metric_row = {**base_row, "status": "ok"}
+            for cell_name, metrics in cell_stats.items():
+                metric_row[f"{cell_name}_mean"] = metrics["mean"]
+                metric_row[f"{cell_name}_median"] = metrics["median"]
+            rows.append(metric_row)
+    except RunCancelled:
+        cancelled = True
+        _log_step(logs, log_callback, "cancel requested: stopping after last completed processing step")
+
+    if skipped_stride:
+        _log_step(logs, log_callback, f"status count skipped_stride: {skipped_stride}")
+    if insufficient_live_window:
+        _log_step(logs, log_callback, f"status count insufficient_live_window: {insufficient_live_window}")
+    _log_step(logs, log_callback, f"tile statistics loop finished with {len(rows)} result rows")
+
+    results = pd.DataFrame(rows) if rows else pd.DataFrame(columns=_base_columns())
+    results = _smooth_results(results, algorithm_config.smoothing_window_images)
+    results_csv = run_folder / "results.csv"
+    _log_step(logs, log_callback, f"writing results CSV: {results_csv}")
+    results.to_csv(results_csv, index=False)
+    summary_plot = run_folder / "summary_plot.png"
+    try:
+        _log_step(logs, log_callback, f"creating summary plot: {summary_plot}")
+        plot_metrics = [col for col in results.columns if col not in _base_columns()][:6]
+        save_metrics_plot(results, plot_metrics, summary_plot, title="ROI tile summary metrics")
+        _log_step(logs, log_callback, "summary plot saved")
+    except Exception:
+        logs.append("summary_plot_error:\n" + traceback.format_exc())
+        _log_step(logs, log_callback, "summary plot failed; traceback written to processing log")
+
+    _log_step(logs, log_callback, f"image cache hits: {image_cache.hits}")
+    _log_step(logs, log_callback, f"image cache misses: {image_cache.misses}")
+    _log_step(logs, log_callback, f"image cache final size: {image_cache.current_size}")
+
+    processed_ok = int((results.get("status") == "ok").sum()) if not results.empty and "status" in results.columns else 0
+    final_processed = total_selected if not cancelled else min(processed_ok, total_selected)
+    final_percentage = 100.0 if not cancelled else float(final_processed / total_selected * 100.0)
+    final_status = "cancelled" if cancelled else "finished"
+    if cancelled:
+        logs.append(f"run_cancelled_after_processed_images: {processed_ok}")
+        _log_step(logs, log_callback, f"run cancelled after {processed_ok} processed images")
+    else:
+        _log_step(logs, log_callback, "run finished successfully")
+
+    final_timestamp = format_datetime(
+        selected.iloc[min(max(final_processed - 1, 0), total_selected - 1)]["timestamp"].to_pydatetime()
+    )
+    final_index = (
+        int(selected.iloc[min(max(final_processed - 1, 0), total_selected - 1)]["source_index"])
+        if total_selected
+        else None
+    )
+    _emit(
+        progress_callback,
+        {
+            "dataset_name": dataset.name,
+            "total_images": total_selected,
+            "processed_images": final_processed,
+            "current_image_index": final_index,
+            "current_timestamp": final_timestamp,
+            "percentage": final_percentage,
+            "status_message": final_status,
+            "compute_backend": compute_context.backend,
+            "compute_device": compute_context.device_name or compute_context.device,
+        },
+    )
+    _finish_log(run_folder, logs, start_time)
+    return RunResult(
+        run_folder=run_folder,
+        results_csv=results_csv,
+        summary_plot=summary_plot,
+        cancelled=cancelled,
+    )
+
+
 def _reference_needs_refresh(
     cache: ReferenceCache | None,
     timestamp: datetime,
@@ -632,6 +891,45 @@ def _to_numpy(image: Any) -> np.ndarray:
     if isinstance(image, np.ndarray):
         return image.astype(np.float32, copy=False)
     return image.detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _compute_cell_timepoint_statistics(
+    image: Any,
+    regions: ComputeMetricRegions,
+    compute_context: ComputeContext,
+) -> dict[str, dict[str, float]]:
+    """Compute mean and median intensity for each ROI cell at one time point."""
+    if compute_context.backend == "gpu":
+        flat_image = image.reshape(-1)
+        stats: dict[str, dict[str, float]] = {}
+        for name, indices in regions.cell_indices.items():
+            values = flat_image[indices]
+            if values.numel() == 0:
+                continue
+            torch = torch_module()
+            finite = values[torch.isfinite(values)]
+            if finite.numel() == 0:
+                continue
+            stats[name] = {
+                "mean": float(torch.mean(finite).item()),
+                "median": float(torch.median(finite).item()),
+            }
+        return stats
+
+    flat_image = image.ravel()
+    stats = {}
+    for name, indices in regions.cell_indices.items():
+        values = flat_image[indices]
+        if values.size == 0:
+            continue
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        stats[name] = {
+            "mean": float(np.mean(finite)),
+            "median": float(np.median(finite)),
+        }
+    return stats
 
 
 def _smooth_results(results: pd.DataFrame, window: int) -> pd.DataFrame:

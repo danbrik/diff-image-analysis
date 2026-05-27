@@ -62,6 +62,7 @@ def main() -> None:
 
         for grid_size, expected_cell in [(3, "cell_009"), (9, "cell_081")]:
             cfg = AlgorithmConfig(
+                algorithm_type="difference",
                 reference_window_size_images=3,
                 reference_gap_images=1,
                 live_average_size_images=1,
@@ -97,6 +98,40 @@ def main() -> None:
             assert f"{expected_cell}_p95_abs_diff" in output.columns
             assert (result.run_folder / "summary_plot.png").exists()
             assert (result.run_folder / "roi_grid_overlay.png").exists()
+
+        tile_cfg = AlgorithmConfig(
+            algorithm_type="tile_statistics",
+            live_average_size_images=2,
+            processing_stride_images=2,
+            smoothing_window_images=2,
+            grid_size=3,
+            compute_backend="cpu",
+            output_directory=str(temp_root / "outputs" / "runs"),
+            run_name="tile_stats",
+        )
+        tile_result = run_difference_analysis(
+            all_records=records,
+            dataset=dataset,
+            roi_config={
+                "preset_name": "synthetic_roi",
+                "dataset_name": "synthetic",
+                "image_shape": [64, 80],
+                "corners": corners,
+                "created_at": "2025-01-01 08:00:00",
+                "comment": "",
+            },
+            algorithm_config=tile_cfg,
+        )
+        tile_output = pd.read_csv(tile_result.results_csv)
+        assert len(tile_output) > 1
+        assert "p95_abs_diff" not in tile_output.columns
+        assert "cell_001_mean" in tile_output.columns
+        assert "cell_001_median" in tile_output.columns
+        assert "cell_009_mean" in tile_output.columns
+        assert "cell_009_median" in tile_output.columns
+        assert (tile_output["status"] == "ok").any()
+        assert tile_output.loc[tile_output["status"] == "ok", "timestamp"].notna().all()
+        assert (tile_result.run_folder / "summary_plot.png").exists()
         print("smoke test passed")
     finally:
         shutil.rmtree(temp_root)

@@ -83,6 +83,11 @@ The repository also includes presets for a quick demo run:
 - Algorithm preset: `synthetic_quick_5x5`
 - Algorithm preset for full-quality GPU runs: `v100_full_quality`
 
+The Algorithm step now supports two modes:
+
+- `difference`: the existing reference-vs-live difference metrics workflow
+- `tile_statistics`: scans the selected time range, computes per-tile intensity summaries, and writes one CSV row with `cell_xxx_mean` and `cell_xxx_median` columns
+
 For a demo run, select `synthetic_test`, click **Index Dataset**, use the complete available range, click **Confirm Dataset**, apply `synthetic_demo_roi`, apply `synthetic_quick_5x5`, and run the algorithm. Use **Reset All** in the header to clear the current UI configuration and return to the first workflow step.
 
 ## Start the App
@@ -102,7 +107,7 @@ The app listens on `0.0.0.0:8050` by default.
 4. In **ROI**, move the four ROI corner points on the preview image or apply an ROI preset, then click **Confirm ROI**.
 5. Choose `grid_size`, default `3`. A `9` value creates an 81-cell ROI-following grid.
 6. Open **ROI presets** only when you want to load, save, or overwrite presets.
-7. In **Algorithm**, edit parameters directly or open **Algorithm presets** to load or save a preset, then click **Confirm Algorithm**.
+7. In **Algorithm**, choose the algorithm type first. `difference` exposes the full reference-image configuration. `tile_statistics` exposes only `processing_stride_images`, `live_average_size_images`, and `smoothing_window_images`, then click **Confirm Algorithm**.
 8. In **Run**, choose **GPU (CUDA)** or **CPU**. GPU is selected by default. Use **Check GPU** to verify PyTorch/CUDA availability; if GPU is selected and CUDA is unavailable, the run returns an error instead of silently falling back to CPU.
 9. Click **Run Algorithm** and watch the progress panel. The run button stays disabled until Dataset, ROI, and Algorithm all show a green check in the workflow navigation. During a run, **Cancel Run** requests a cooperative stop; the app finishes the current processing step, writes the partial run artifacts, and marks the job as cancelled. The progress panel also shows a rough remaining-time estimate based on the recent progress rate. Open **Run log** to inspect coarse intermediate steps such as setup, cache initialization, mask preparation, reference refreshes, 5% progress marks, output writing, and final cache stats.
 
@@ -173,7 +178,7 @@ Use the **Load Results** tab:
 5. Use the interactive SVG plots to zoom into a time range by dragging across a plot. Remove a metric either by unchecking it in the metric list or by clicking the cross on its plot.
 6. Click **Save Plot PNG** to generate a static PNG plot in that run folder.
 
-The result viewer detects available metric columns from `results.csv`, so it works with `3x3`, `9x9`, or any other `grid_size x grid_size` run.
+The result viewer detects available metric columns from `results.csv`, so it works with `3x3`, `9x9`, or any other `grid_size x grid_size` run, including `tile_statistics` runs that only output per-cell mean/median summary columns.
 
 ## Smoke Test
 

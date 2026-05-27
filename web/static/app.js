@@ -37,37 +37,147 @@ const state = {
 };
 
 const cornerOrder = ["top_left", "top_right", "bottom_right", "bottom_left"];
+const algorithmTypeOptions = [
+  ["difference", "Difference metrics"],
+  ["tile_statistics", "Tile mean/median summary"],
+];
 const algorithmFields = [
-  ["reference_window_size_images", "number", "Reference window images", 1, 1],
-  ["reference_gap_images", "number", "Reference gap images", 0, 1],
-  ["live_average_size_images", "number", "Live average images", 1, 1],
-  ["processing_stride_images", "number", "Processing stride images", 1, 1],
-  ["difference_threshold_abs", "number", "Difference threshold abs", 0, 0.1],
-  ["smoothing_window_images", "number", "Smoothing window images", 1, 1],
-  ["image_downscale_factor", "number", "Image downscale factor", 0.001, 0.05],
-  ["use_median_reference", "checkbox", "Use median reference", null, null],
-  ["reference_refresh_interval_minutes", "number", "Reference refresh minutes", 0, 1],
-  ["image_cache_size_images", "number", "Image cache size images", 0, 1],
-  ["grid_size", "number", "Grid size", 1, 1],
-  ["output_directory", "text", "Output directory", null, null],
-  ["save_preview_images", "checkbox", "Save preview images", null, null],
-  ["preview_image_count", "number", "Preview image count", 0, 1],
-  ["run_name", "text", "Run name", null, null],
+  {
+    name: "algorithm_type",
+    type: "select",
+    label: "Algorithm",
+    options: algorithmTypeOptions,
+    algorithms: ["difference", "tile_statistics"],
+  },
+  {
+    name: "reference_window_size_images",
+    type: "number",
+    label: "Reference window images",
+    min: 1,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "reference_gap_images",
+    type: "number",
+    label: "Reference gap images",
+    min: 0,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "live_average_size_images",
+    type: "number",
+    label: "Live average images",
+    min: 1,
+    step: 1,
+    algorithms: ["difference", "tile_statistics"],
+  },
+  {
+    name: "processing_stride_images",
+    type: "number",
+    label: "Processing stride images",
+    min: 1,
+    step: 1,
+    algorithms: ["difference", "tile_statistics"],
+  },
+  {
+    name: "difference_threshold_abs",
+    type: "number",
+    label: "Difference threshold abs",
+    min: 0,
+    step: 0.1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "smoothing_window_images",
+    type: "number",
+    label: "Smoothing window images",
+    min: 1,
+    step: 1,
+    algorithms: ["difference", "tile_statistics"],
+  },
+  {
+    name: "image_downscale_factor",
+    type: "number",
+    label: "Image downscale factor",
+    min: 0.001,
+    step: 0.05,
+    algorithms: ["difference"],
+  },
+  {
+    name: "use_median_reference",
+    type: "checkbox",
+    label: "Use median reference",
+    algorithms: ["difference"],
+  },
+  {
+    name: "reference_refresh_interval_minutes",
+    type: "number",
+    label: "Reference refresh minutes",
+    min: 0,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "image_cache_size_images",
+    type: "number",
+    label: "Image cache size images",
+    min: 0,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "grid_size",
+    type: "number",
+    label: "Grid size",
+    min: 1,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "output_directory",
+    type: "text",
+    label: "Output directory",
+    algorithms: ["difference"],
+  },
+  {
+    name: "save_preview_images",
+    type: "checkbox",
+    label: "Save preview images",
+    algorithms: ["difference"],
+  },
+  {
+    name: "preview_image_count",
+    type: "number",
+    label: "Preview image count",
+    min: 0,
+    step: 1,
+    algorithms: ["difference"],
+  },
+  {
+    name: "run_name",
+    type: "text",
+    label: "Run name",
+    algorithms: ["difference"],
+  },
 ];
 
 const algorithmHelp = {
+  algorithm_type:
+    "Difference metrics computes the existing reference-vs-live metrics. Tile mean/median summary only scans the selected images and returns one mean and one median over time for each ROI tile.",
   reference_window_size_images:
     "Number of previous images used to compute the reference image.",
   reference_gap_images:
     "Number of images between the current live image and the end of the reference window.",
   live_average_size_images:
-    "Number of consecutive images averaged before processing the current live image. Use larger values to reduce noise and flicker.",
+    "Number of consecutive images averaged before processing the current image. Use larger values to reduce noise and flicker.",
   processing_stride_images:
     "Process every nth image. A value of 1 processes every image; larger values reduce runtime and output density.",
   difference_threshold_abs:
     "Absolute difference threshold used for area-ratio metrics and affected-cell detection.",
   smoothing_window_images:
-    "Rolling smoothing window applied to numeric output metrics. A value of 1 disables smoothing.",
+    "Rolling smoothing window applied to numeric output values. A value of 1 disables smoothing.",
   image_downscale_factor:
     "Scale factor applied while loading images. Keep 1.0 for identical full-resolution analysis; values below 1.0 downscale images and change results.",
   use_median_reference:
@@ -87,6 +197,30 @@ const algorithmHelp = {
   run_name:
     "Optional name appended to the timestamped output folder. Unsafe filename characters are replaced.",
 };
+
+function activeAlgorithmType(values = null) {
+  const candidate = values?.algorithm_type || document.querySelector("[data-algorithm-field='algorithm_type']")?.value;
+  return candidate === "tile_statistics" ? "tile_statistics" : "difference";
+}
+
+function visibleAlgorithmFields(algorithmType) {
+  return algorithmFields.filter((field) => field.algorithms.includes(algorithmType) || field.name === "algorithm_type");
+}
+
+function readVisibleAlgorithmInputs() {
+  const config = {};
+  for (const input of document.querySelectorAll("[data-algorithm-field]")) {
+    const name = input.dataset.algorithmField;
+    if (input.type === "checkbox") {
+      config[name] = input.checked;
+    } else if (input.type === "number") {
+      config[name] = Number(input.value);
+    } else {
+      config[name] = input.value;
+    }
+  }
+  return config;
+}
 
 function $(id) {
   return document.getElementById(id);
@@ -1084,20 +1218,41 @@ async function loadAlgorithmPresets() {
 function renderAlgorithmForm(values) {
   const form = $("algorithm-form");
   form.replaceChildren();
-  for (const [name, type, labelText, min, step] of algorithmFields) {
+  const algorithmType = activeAlgorithmType(values);
+  for (const field of visibleAlgorithmFields(algorithmType)) {
+    const { name, type, label, min, step, options } = field;
     if (type === "checkbox") {
-      const label = document.createElement("label");
-      label.className = "checkbox-label";
+      const labelEl = document.createElement("label");
+      labelEl.className = "checkbox-label";
       const input = document.createElement("input");
       input.type = "checkbox";
       input.dataset.algorithmField = name;
       input.checked = Boolean(values[name]);
       input.addEventListener("change", markAlgorithmDirty);
-      label.append(input, createLabelHeading(labelText, algorithmHelp[name]));
-      form.append(label);
+      labelEl.append(input, createLabelHeading(label, algorithmHelp[name]));
+      form.append(labelEl);
+    } else if (type === "select") {
+      const labelEl = document.createElement("label");
+      labelEl.append(createLabelHeading(label, algorithmHelp[name]));
+      const select = document.createElement("select");
+      select.dataset.algorithmField = name;
+      for (const [optionValue, optionLabel] of options) {
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        select.append(option);
+      }
+      select.value = values[name] ?? "difference";
+      select.addEventListener("change", () => {
+        const nextValues = { ...state.algorithmDefaults, ...readVisibleAlgorithmInputs(), algorithm_type: select.value };
+        renderAlgorithmForm(nextValues);
+        markAlgorithmDirty();
+      });
+      labelEl.append(select);
+      form.append(labelEl);
     } else {
-      const label = document.createElement("label");
-      label.append(createLabelHeading(labelText, algorithmHelp[name]));
+      const labelEl = document.createElement("label");
+      labelEl.append(createLabelHeading(label, algorithmHelp[name]));
       const input = document.createElement("input");
       input.type = type;
       input.dataset.algorithmField = name;
@@ -1114,8 +1269,8 @@ function renderAlgorithmForm(values) {
       } else {
         input.addEventListener("change", markAlgorithmDirty);
       }
-      label.append(input);
-      form.append(label);
+      labelEl.append(input);
+      form.append(labelEl);
     }
   }
   $("grid-size").value = values.grid_size ?? 3;
@@ -1140,17 +1295,7 @@ function applyAlgorithmPreset() {
 }
 
 function getAlgorithmConfig() {
-  const config = {};
-  for (const input of document.querySelectorAll("[data-algorithm-field]")) {
-    const name = input.dataset.algorithmField;
-    if (input.type === "checkbox") {
-      config[name] = input.checked;
-    } else if (input.type === "number") {
-      config[name] = Number(input.value);
-    } else {
-      config[name] = input.value;
-    }
-  }
+  const config = { ...state.algorithmDefaults, ...readVisibleAlgorithmInputs() };
   config.grid_size = getGridSize();
   if ($("compute-backend")) config.compute_backend = $("compute-backend").value || "gpu";
   return config;
@@ -1558,7 +1703,10 @@ function renderSvgPlot(metric) {
   const height = 240;
   const margin = { top: 18, right: 24, bottom: 42, left: 64 };
   const points = state.resultRows
-    .map((row) => ({ x: row.timestampMs, y: Number(row[metric]) }))
+    .map((row) => ({
+      x: row.timestampMs,
+      y: row[metric] == null ? Number.NaN : Number(row[metric]),
+    }))
     .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
   if (!points.length) {
     const text = svgText(450, 120, "No numeric values for this metric", "middle");
@@ -1595,12 +1743,23 @@ function renderSvgPlot(metric) {
 
   const pathPoints = visible.length ? visible : points;
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute(
-    "d",
-    pathPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.x).toFixed(2)} ${yScale(point.y).toFixed(2)}`).join(" ")
-  );
-  path.setAttribute("class", "plot-line");
-  svg.append(path);
+  if (pathPoints.length === 1) {
+    const point = pathPoints[0];
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", xScale(point.x).toFixed(2));
+    circle.setAttribute("cy", yScale(point.y).toFixed(2));
+    circle.setAttribute("r", "3");
+    circle.setAttribute("class", "plot-line");
+    circle.setAttribute("fill", "var(--accent)");
+    svg.append(circle);
+  } else {
+    path.setAttribute(
+      "d",
+      pathPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.x).toFixed(2)} ${yScale(point.y).toFixed(2)}`).join(" ")
+    );
+    path.setAttribute("class", "plot-line");
+    svg.append(path);
+  }
 
   const tickCount = 4;
   for (let i = 0; i <= tickCount; i += 1) {

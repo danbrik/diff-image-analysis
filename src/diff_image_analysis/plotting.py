@@ -54,7 +54,15 @@ def save_metrics_plot(
     timestamps = pd.to_datetime(results.get("timestamp"), errors="coerce")
     for ax, metric in zip(axes, available):
         values = pd.to_numeric(results[metric], errors="coerce")
-        ax.plot(timestamps, values, linewidth=1.4)
+        valid = timestamps.notna() & values.notna()
+        filtered_timestamps = timestamps[valid]
+        filtered_values = values[valid]
+        if filtered_values.empty:
+            ax.text(0.5, 0.5, "No plottable values", ha="center", va="center", transform=ax.transAxes)
+        else:
+            marker = "o" if len(filtered_values) <= 200 else None
+            markersize = 2.5 if marker else None
+            ax.plot(filtered_timestamps, filtered_values, linewidth=1.4, marker=marker, markersize=markersize)
         ax.set_ylabel(metric)
         ax.grid(True, alpha=0.25)
     axes[0].set_title(title)
